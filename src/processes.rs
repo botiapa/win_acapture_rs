@@ -1,14 +1,14 @@
 use thiserror::Error;
 use windows::Win32::{
-    Foundation::{PROPERTYKEY, S_OK},
+    Foundation::S_OK,
     Media::Audio::{
-        eRender, AudioSessionState, EDataFlow, ERole, IAudioSessionControl, IAudioSessionControl2, IAudioSessionEnumerator,
-        IAudioSessionManager2, IControlInterface_Impl, IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator, IMMNotificationClient,
-        IMMNotificationClient_Impl, MMDeviceEnumerator, DEVICE_STATE, DEVICE_STATE_ACTIVE,
+        eRender, AudioSessionStateActive, AudioSessionStateExpired, AudioSessionStateInactive, IAudioSessionControl, IAudioSessionControl2,
+        IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator, MMDeviceEnumerator,
+        DEVICE_STATE_ACTIVE,
     },
     System::Com::{CoCreateInstance, CLSCTX_ALL},
 };
-use windows_core::{implement, Interface, GUID, PCWSTR, PWSTR};
+use windows_core::{Interface, PWSTR};
 
 use crate::com::com_initialized;
 
@@ -98,10 +98,28 @@ impl Session {
 
     pub fn get_state(&self) -> Result<AudioSessionState, ProcessesError> {
         let state = unsafe { self.session1.GetState() }.map_err(ProcessesError::DisplayNameError)?;
-        Ok(state)
+        Ok(state.into())
     }
 }
 pub struct ProcessesManager {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AudioSessionState {
+    AudioSessionStateInactive,
+    AudioSessionStateActive,
+    AudioSessionStateExpired,
+}
+
+impl From<windows::Win32::Media::Audio::AudioSessionState> for AudioSessionState {
+    fn from(state: windows::Win32::Media::Audio::AudioSessionState) -> Self {
+        match state {
+            AudioSessionStateInactive => AudioSessionState::AudioSessionStateInactive,
+            AudioSessionStateActive => AudioSessionState::AudioSessionStateActive,
+            AudioSessionStateExpired => AudioSessionState::AudioSessionStateExpired,
+            _ => panic!("Unknown audio session state"),
+        }
+    }
+}
 
 impl ProcessesManager {
     pub fn new() -> Result<Self, ProcessesError> {
@@ -220,7 +238,7 @@ mod tests {
         let p = ProcessesManager::new();
         assert!(p.is_ok());
 
-        let mut p = p.unwrap();
+        let p = p.unwrap();
         assert!(p.query_sessions().is_ok());
     }
 }

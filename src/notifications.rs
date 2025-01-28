@@ -1,8 +1,7 @@
-use std::hash::Hash;
 use std::{collections::HashMap, string::FromUtf16Error};
 
 use thiserror::Error;
-use windows::Win32::Media::Audio::{AudioSessionDisconnectReason, AudioSessionState, IAudioSessionControl2, IAudioSessionManager2};
+use windows::Win32::Media::Audio::{AudioSessionDisconnectReason, AudioSessionState, IAudioSessionControl2};
 use windows::Win32::{
     Foundation::{self, PROPERTYKEY},
     Media::Audio::{
