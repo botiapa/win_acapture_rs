@@ -1,7 +1,15 @@
+use std::ops::Deref;
+use std::sync::mpsc::{self, Receiver};
+use std::thread::{self, JoinHandle};
 use std::{collections::HashMap, string::FromUtf16Error};
 
+use log::trace;
 use thiserror::Error;
-use windows::Win32::Media::Audio::{AudioSessionDisconnectReason, AudioSessionState, IAudioSessionControl2};
+use windows::Win32::Media::Audio::{
+    self, AudioSessionDisconnectReason, AudioSessionState, IAudioSessionControl, IAudioSessionControl2, IAudioSessionManager2,
+    IAudioSessionNotification, IAudioSessionNotification_Impl, IMMDevice,
+};
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::{
     Foundation::{self, PROPERTYKEY},
     Media::Audio::{
@@ -10,14 +18,20 @@ use windows::Win32::{
     },
     System::Com::{CoCreateInstance, CLSCTX_ALL},
 };
-use windows_core::{implement, PCWSTR, PWSTR};
+use windows_core::{implement, IUnknown, Interface, PCWSTR, PWSTR};
 
 use crate::com::com_initialized;
-use crate::processes::Session;
+use crate::processes::{Device, Devices, ProcessesError, SafeSessionId, Session};
+use crate::session_notification::{session_notification_thread, SessionCreated, SessionNotificationCommand, SessionNotificationMessage};
 
 pub struct Notifications {
     _device_notification_client: Option<(IMMDeviceEnumerator, IMMNotificationClient)>,
-    _session_notification_client: HashMap<String, (IAudioSessionControl2, IAudioSessionEvents)>,
+    _session_event_client: HashMap<String, (IAudioSessionControl2, IAudioSessionEvents)>,
+    _session_notification: Option<(
+        mpsc::Sender<SessionNotificationCommand>,
+        mpsc::Receiver<SessionNotificationMessage>,
+        JoinHandle<()>,
+    )>,
 }
 
 #[derive(Error, Debug)]
@@ -28,19 +42,36 @@ pub enum NotificationError {
     NotificationAlreadyRegistered,
     #[error("Failed registering for notifications: {0}")]
     NotificationRegisterError(windows::core::Error),
+    #[error("Failed unregistering for notifications: {0}")]
+    NotificationUnregisterError(windows::core::Error),
     #[error("Failed converting raw PCWSTR string: {0}")]
     PCWSTRConversionError(FromUtf16Error),
     #[error("Failed activating device: {0}")]
     SessionManagerActivationError(windows::core::Error),
     #[error("Failed setting up notification through session manager: {0}")]
     FailedSettingUpNotification(windows::core::Error),
+    #[error("Failed enumerating devices: {0}")]
+    FailedEnumeratingDevices(ProcessesError),
+    #[error("Failed activating session manager: {0}")]
+    FailedActivatingSessionManager(windows::core::Error),
+    #[error("Failed getting device id: {0}")]
+    FailedGettingDeviceId(windows::core::Error),
+    #[error("Failed starting notification thread")]
+    FailedStartingNotificationThread,
+    #[error("Failed setting up notification")]
+    FailedRegisteringSessionNotification,
+    #[error("Failed unregistering notification")]
+    FailedUnregisteringSessionNotification,
+    #[error("Notification thread not running, can't unregister notification")]
+    SessionNotificationThreadNotRunning,
 }
 
 impl Notifications {
     pub fn new() -> Self {
         Self {
             _device_notification_client: None,
-            _session_notification_client: HashMap::new(),
+            _session_event_client: HashMap::new(),
+            _session_notification: None,
         }
     }
 
@@ -58,24 +89,80 @@ impl Notifications {
         Ok(())
     }
 
-    pub fn register_session_notification<CB>(&mut self, session: &Session, callback_fn: CB) -> Result<(), NotificationError>
+    pub fn register_session_event<CB>(&mut self, session: &Session, callback_fn: CB) -> Result<(), NotificationError>
     where
         CB: Fn(AudioSessionEventArgs) + Send + 'static,
     {
         let name = unsafe { session.get_name().to_string() }.map_err(NotificationError::PCWSTRConversionError)?;
-        if self._session_notification_client.contains_key(&name) {
+        if self._session_event_client.contains_key(&name) {
             return Err(NotificationError::NotificationAlreadyRegistered);
         }
         com_initialized();
-        let session_notification_client = ISessionNotificationClient::new(session.get_name().clone(), callback_fn);
+        let session_notification_client = ISessionEventClient::new(session.get_name().clone(), callback_fn);
         let session_notification_client = session_notification_client.into();
 
         // Set up the notification
         unsafe { session.get_session().RegisterAudioSessionNotification(&session_notification_client) }
             .map_err(NotificationError::FailedSettingUpNotification)?;
 
-        self._session_notification_client
-            .insert(name, (session.get_session().clone(), session_notification_client));
+        self._session_event_client
+            .insert(name.clone(), (session.get_session().clone(), session_notification_client));
+        trace!("Session event registered: {}", name);
+        Ok(())
+    }
+
+    pub fn unregister_session_event(&mut self, session_id: &SafeSessionId) -> Result<(), NotificationError> {
+        let name = unsafe { session_id.0.to_string() }.map_err(NotificationError::PCWSTRConversionError)?;
+        if let Some((sc, nc)) = self._session_event_client.remove(&name) {
+            unsafe { sc.UnregisterAudioSessionNotification(&nc) }.map_err(NotificationError::NotificationUnregisterError)?;
+        }
+        trace!("Session event unregistered: {}", name);
+        Ok(())
+    }
+
+    pub fn register_session_notification(
+        &mut self,
+        callback_fn: impl Fn(SessionCreated) + Send + 'static + Clone + Sync,
+        dev: Device,
+    ) -> Result<(), NotificationError> {
+        self.notification_thread_running()
+            .map_err(|_| NotificationError::FailedStartingNotificationThread)?;
+        let (send, recv, _) = self._session_notification.as_ref().unwrap();
+        send.send(SessionNotificationCommand::RegisterNotification(Box::new(callback_fn), dev))
+            .unwrap();
+        match recv.recv() {
+            Ok(SessionNotificationMessage::NotificationRegistered) => Ok(()),
+            _ => Err(NotificationError::FailedRegisteringSessionNotification),
+        }
+    }
+
+    pub fn unregister_session_notification(&mut self, dev: Device) -> Result<(), NotificationError> {
+        match &self._session_notification {
+            Some((send, recv, _)) => {
+                send.send(SessionNotificationCommand::UnregisterNotification(dev)).unwrap();
+                match recv.recv() {
+                    Ok(SessionNotificationMessage::NotificationUnregistered) => Ok(()),
+                    _ => Err(NotificationError::FailedUnregisteringSessionNotification),
+                }
+            }
+            None => Err(NotificationError::SessionNotificationThreadNotRunning),
+        }
+    }
+
+    fn notification_thread_running(&mut self) -> Result<(), NotificationError> {
+        if self._session_notification.is_some() {
+            return Ok(());
+        }
+
+        let (response_send, response_recv) = std::sync::mpsc::channel();
+        let (comm_send, comm_recv) = std::sync::mpsc::channel();
+
+        let t = thread::spawn(move || session_notification_thread(response_send, comm_recv));
+        match response_recv.recv() {
+            Ok(SessionNotificationMessage::Ready) => {}
+            _ => return Err(NotificationError::FailedStartingNotificationThread),
+        }
+        self._session_notification = Some((comm_send, response_recv, t));
         Ok(())
     }
 }
@@ -90,11 +177,16 @@ impl Drop for Notifications {
             };
         }
 
-        for (_, (sc, nc)) in self._session_notification_client.drain() {
+        for (_, (sc, nc)) in self._session_event_client.drain() {
             unsafe {
                 sc.UnregisterAudioSessionNotification(&nc)
                     .expect("Failed unregistering session notification client");
             };
+        }
+
+        if let Some((send, recv, t)) = self._session_notification.take() {
+            send.send(SessionNotificationCommand::Stop).unwrap();
+            t.join().unwrap();
         }
     }
 }
@@ -133,15 +225,6 @@ impl IMMNotificationClient_Impl for IDeviceNotificationClient_Impl {
         println!("Property value changed");
         todo!()
     }
-}
-
-#[implement(IAudioSessionEvents)]
-struct ISessionNotificationClient<CB>
-where
-    CB: Fn(AudioSessionEventArgs) + Send + 'static,
-{
-    _session_id: PWSTR,
-    callback_fn: CB,
 }
 
 #[derive(Debug)]
@@ -187,9 +270,33 @@ pub struct StateChangedArgs {
     newstate: AudioSessionState,
 }
 
+impl StateChangedArgs {
+    pub fn get_state(&self) -> &AudioSessionState {
+        &self.newstate
+    }
+}
+
 #[derive(Debug)]
 pub struct SessionDisconnectedArgs {
     disconnectreason: AudioSessionDisconnectReason,
+}
+
+#[derive(Debug, Clone)]
+pub enum SessionDisconnectReason {
+    AudioSessionStateActive,
+    AudioSessionStateExpired,
+    AudioSessionStateInactive,
+}
+
+impl SessionDisconnectedArgs {
+    pub fn get_reason(&self) -> SessionDisconnectReason {
+        match self.disconnectreason.0 {
+            0 => SessionDisconnectReason::AudioSessionStateInactive,
+            1 => SessionDisconnectReason::AudioSessionStateActive,
+            2 => SessionDisconnectReason::AudioSessionStateExpired,
+            _ => panic!("Unknown disconnect reason"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -198,19 +305,34 @@ pub struct IconPathChangedArgs {
     eventcontext: *const windows_core::GUID,
 }
 
-impl<CB> ISessionNotificationClient<CB>
+impl IconPathChangedArgs {
+    pub fn get_icon_path(&self) -> Result<String, NotificationError> {
+        unsafe { self.newiconpath.to_string() }.map_err(NotificationError::PCWSTRConversionError)
+    }
+}
+
+#[implement(IAudioSessionEvents)]
+struct ISessionEventClient<CB>
+where
+    CB: Fn(AudioSessionEventArgs) + Send + 'static,
+{
+    _session_id: PWSTR,
+    _callback_fn: CB,
+}
+
+impl<CB> ISessionEventClient<CB>
 where
     CB: Fn(AudioSessionEventArgs) + Send + 'static,
 {
     pub fn new(session_id: PWSTR, callback_fn: CB) -> Self {
         Self {
             _session_id: session_id,
-            callback_fn,
+            _callback_fn: callback_fn,
         }
     }
 }
 
-impl<CB> IAudioSessionEvents_Impl for ISessionNotificationClient_Impl<CB>
+impl<CB> IAudioSessionEvents_Impl for ISessionEventClient_Impl<CB>
 where
     CB: Fn(AudioSessionEventArgs) + Send + 'static,
 {
@@ -219,7 +341,7 @@ where
         newdisplayname: &windows_core::PCWSTR,
         eventcontext: *const windows_core::GUID,
     ) -> windows_core::Result<()> {
-        (self.callback_fn)(AudioSessionEventArgs::DisplayNameChanged(DisplayNameChangedArgs {
+        (self._callback_fn)(AudioSessionEventArgs::DisplayNameChanged(DisplayNameChangedArgs {
             newdisplayname: newdisplayname.clone(),
             eventcontext,
         }));
@@ -227,7 +349,7 @@ where
     }
 
     fn OnIconPathChanged(&self, newiconpath: &windows_core::PCWSTR, eventcontext: *const windows_core::GUID) -> windows_core::Result<()> {
-        (self.callback_fn)(AudioSessionEventArgs::IconPathChanged(IconPathChangedArgs {
+        (self._callback_fn)(AudioSessionEventArgs::IconPathChanged(IconPathChangedArgs {
             newiconpath: newiconpath.clone(),
             eventcontext,
         }));
@@ -240,7 +362,7 @@ where
         newmute: Foundation::BOOL,
         eventcontext: *const windows_core::GUID,
     ) -> windows_core::Result<()> {
-        (self.callback_fn)(AudioSessionEventArgs::SimpleVolumeChanged(SimpleVolumeChangedArgs {
+        (self._callback_fn)(AudioSessionEventArgs::SimpleVolumeChanged(SimpleVolumeChangedArgs {
             newvolume,
             newmute,
             eventcontext,
@@ -255,7 +377,7 @@ where
         changedchannel: u32,
         eventcontext: *const windows_core::GUID,
     ) -> windows_core::Result<()> {
-        (self.callback_fn)(AudioSessionEventArgs::ChannelVolumeChanged(ChannelVolumeChangedArgs {
+        (self._callback_fn)(AudioSessionEventArgs::ChannelVolumeChanged(ChannelVolumeChangedArgs {
             channelcount,
             newchannelvolumearray,
             changedchannel,
@@ -269,7 +391,7 @@ where
         newgroupingparam: *const windows_core::GUID,
         eventcontext: *const windows_core::GUID,
     ) -> windows_core::Result<()> {
-        (self.callback_fn)(AudioSessionEventArgs::GroupingParamChanged(GroupingParamChangedArgs {
+        (self._callback_fn)(AudioSessionEventArgs::GroupingParamChanged(GroupingParamChangedArgs {
             newgroupingparam,
             eventcontext,
         }));
@@ -277,7 +399,7 @@ where
     }
 
     fn OnStateChanged(&self, newstate: windows::Win32::Media::Audio::AudioSessionState) -> windows_core::Result<()> {
-        (self.callback_fn)(AudioSessionEventArgs::StateChanged(StateChangedArgs { newstate }));
+        (self._callback_fn)(AudioSessionEventArgs::StateChanged(StateChangedArgs { newstate }));
         Ok(())
     }
 
@@ -285,7 +407,7 @@ where
         &self,
         disconnectreason: windows::Win32::Media::Audio::AudioSessionDisconnectReason,
     ) -> windows_core::Result<()> {
-        (self.callback_fn)(AudioSessionEventArgs::SessionDisconnected(SessionDisconnectedArgs {
+        (self._callback_fn)(AudioSessionEventArgs::SessionDisconnected(SessionDisconnectedArgs {
             disconnectreason,
         }));
         Ok(())

@@ -1,11 +1,13 @@
 use std::{
+    fmt::Display,
     sync::{atomic::AtomicBool, Arc},
     thread,
     time::Duration,
 };
 
-use crate::activation_params::SafeActivationParams;
 use crate::com::com_initialized;
+use crate::{activation_params::SafeActivationParams, sample_format::SampleFormat};
+use log::error;
 use windows::{
     core::{IUnknown, Interface, GUID, HRESULT},
     Win32::{
@@ -27,17 +29,7 @@ pub struct AudioCapture {
     _handler: IActivateAudioInterfaceCompletionHandler,
     _thread: Option<thread::JoinHandle<()>>,
     _thread_stop_handle: Option<HANDLE>,
-}
-
-fn get_waveformatex(channel: u16, n_samples_per_sec: u32, w_bits_per_sample: u16) -> WAVEFORMATEX {
-    let mut capture_format = WAVEFORMATEX::default();
-    capture_format.wFormatTag = WAVE_FORMAT_PCM as u16;
-    capture_format.nChannels = channel;
-    capture_format.nSamplesPerSec = n_samples_per_sec;
-    capture_format.wBitsPerSample = w_bits_per_sample;
-    capture_format.nBlockAlign = capture_format.nChannels * capture_format.wBitsPerSample / 8;
-    capture_format.nAvgBytesPerSec = capture_format.nSamplesPerSec * capture_format.nBlockAlign as u32;
-    capture_format
+    _format: SampleFormat,
 }
 
 struct RunContext {
@@ -47,7 +39,7 @@ struct RunContext {
 }
 unsafe impl Send for RunContext {}
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RecordingError {
     FailedToCreateStopEvent(windows_core::Error),
     FailedToSetupEventHandle(windows_core::Error),
@@ -57,6 +49,13 @@ pub enum RecordingError {
     FailedReleasingBuffer(windows_core::Error),
     FailedStoppingAudioClient(windows_core::Error),
     FailedResettingAudioClient(windows_core::Error),
+    AlreadyRecording,
+}
+
+impl Display for RecordingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Recording error: {:?}", self)
+    }
 }
 
 impl AudioCapture {
@@ -68,7 +67,16 @@ impl AudioCapture {
             _handler: ActivateHandler::new(_activate_completed).into(),
             _thread: None,
             _thread_stop_handle: None,
+            _format: SampleFormat::default(),
         }
+    }
+
+    pub fn set_format(&mut self, format: SampleFormat) -> Result<(), RecordingError> {
+        if self._activate_completed.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(RecordingError::AlreadyRecording);
+        }
+        self._format = format;
+        Ok(())
     }
 
     pub fn start_recording<D, E>(&mut self, pid: u32, data_callback: D, mut error_callback: E)
@@ -76,6 +84,9 @@ impl AudioCapture {
         D: FnMut(&[u8]) + Send + 'static,
         E: FnMut(RecordingError) + Send + 'static,
     {
+        if self._activate_completed.load(std::sync::atomic::Ordering::Relaxed) {
+            panic!("Can only start one recording on each instance of AudioCapture");
+        }
         com_initialized();
         let activate_params = SafeActivationParams::new(pid);
 
@@ -121,7 +132,7 @@ impl AudioCapture {
         .expect("Failed getting activate result");
 
         let audio_client = activated_interface.unwrap().cast::<IAudioClient>().unwrap();
-        let capture_format = get_waveformatex(2, 44100, 16);
+        let capture_format = self._format.clone().into();
 
         unsafe {
             audio_client.Initialize(
@@ -168,7 +179,7 @@ impl AudioCapture {
 
             if wait_res == WAIT_FAILED {
                 let err = unsafe { Foundation::GetLastError() };
-                eprintln!("Wait failed: {:?}", err);
+                error!("Wait failed: {:?}", err);
                 return Err(RecordingError::WaitFailed(err));
             }
 

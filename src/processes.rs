@@ -1,14 +1,16 @@
+use std::{string::FromUtf16Error, time::Instant};
+
 use thiserror::Error;
 use windows::Win32::{
     Foundation::S_OK,
     Media::Audio::{
         eRender, AudioSessionStateActive, AudioSessionStateExpired, AudioSessionStateInactive, IAudioSessionControl, IAudioSessionControl2,
-        IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator, MMDeviceEnumerator,
+        IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator, In, MMDeviceEnumerator,
         DEVICE_STATE_ACTIVE,
     },
     System::Com::{CoCreateInstance, CLSCTX_ALL},
 };
-use windows_core::{Interface, PWSTR};
+use windows_core::{Interface, GUID, PWSTR};
 
 use crate::com::com_initialized;
 
@@ -36,9 +38,23 @@ pub enum ProcessesError {
     ProcessIdError(windows::core::Error),
     #[error("Failed getting display name: {0}")]
     DisplayNameError(windows::core::Error),
+    #[error("Failed getting state: {0}")]
+    GetStateError(windows::core::Error),
+    #[error("Failed getting icon path: {0}")]
+    IconPathError(windows::core::Error),
+    #[error("Failed parsing raw utf16 string: {0}")]
+    RawStringParseError(FromUtf16Error),
+    #[error("Session not found")]
+    GetSessionError(windows::core::Error),
+    #[error("Failed to find session with given id")]
+    SessionNotFound,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct SafeSessionId(pub(crate) PWSTR);
+unsafe impl Send for SafeSessionId {}
+
+#[derive(Debug, Clone)]
 pub struct Session {
     name: PWSTR,
     process_name: Option<String>,
@@ -48,9 +64,28 @@ pub struct Session {
     session1: IAudioSessionControl,
 }
 
+impl PartialEq for Session {
+    fn eq(&self, other: &Self) -> bool {
+        let n1 = unsafe { self.name.to_string() };
+        let n2 = unsafe { other.name.to_string() };
+        if n1.is_err() || n2.is_err() {
+            return false;
+        }
+        n1.unwrap() == n2.unwrap()
+    }
+}
+
 impl Session {
+    pub fn get_id(&self) -> SafeSessionId {
+        SafeSessionId(self.name)
+    }
+
     pub fn get_name(&self) -> &PWSTR {
         &self.name
+    }
+
+    pub fn get_name_string(&self) -> Result<String, ProcessesError> {
+        Ok(unsafe { self.name.to_string() }.map_err(ProcessesError::RawStringParseError)?)
     }
 
     pub fn get_process_name(&self) -> &Option<String> {
@@ -69,7 +104,7 @@ impl Session {
         &self.session
     }
 
-    pub fn from_session(session: IAudioSessionControl2) -> Result<Self, ProcessesError> {
+    pub(crate) fn from_session(session: IAudioSessionControl2) -> Result<Self, ProcessesError> {
         let pid = unsafe { session.GetProcessId() }.map_err(ProcessesError::ProcessIdError)?;
         let name_pwstr = unsafe { session.GetSessionInstanceIdentifier().map_err(ProcessesError::DisplayNameError)? };
         let process_name = Self::parse_process_name(name_pwstr);
@@ -97,10 +132,35 @@ impl Session {
     }
 
     pub fn get_state(&self) -> Result<AudioSessionState, ProcessesError> {
-        let state = unsafe { self.session1.GetState() }.map_err(ProcessesError::DisplayNameError)?;
+        let state = unsafe { self.session1.GetState() }.map_err(ProcessesError::GetStateError)?;
         Ok(state.into())
     }
+
+    pub fn get_icon_path(&self) -> Result<String, ProcessesError> {
+        let icon_path = unsafe { self.session1.GetIconPath() }.map_err(ProcessesError::IconPathError)?;
+        Ok(unsafe { icon_path.to_string() }.unwrap())
+    }
 }
+
+pub struct Device {
+    pub(crate) inner: IMMDevice,
+}
+
+unsafe impl Send for Device {}
+
+impl Device {
+    pub fn get_id(&self) -> Result<String, ProcessesError> {
+        let id = unsafe { self.inner.GetId() }.map_err(ProcessesError::DeviceError)?;
+        Ok(unsafe { id.to_string() }.map_err(ProcessesError::RawStringParseError)?)
+    }
+}
+
+impl From<IMMDevice> for Device {
+    fn from(dev: IMMDevice) -> Self {
+        Self { inner: dev }
+    }
+}
+
 pub struct ProcessesManager {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,11 +187,9 @@ impl ProcessesManager {
     }
 
     /// Queries all active audio sessions
-    pub fn query_sessions(&self) -> Result<Vec<Session>, ProcessesError> {
+    pub fn get_sessions(&self) -> Result<Vec<Session>, ProcessesError> {
         com_initialized();
-        let device_enumerator: IMMDeviceEnumerator =
-            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(ProcessesError::InstanceCreationError)?;
-        let dev_collection = Devices::new(&device_enumerator)?;
+        let dev_collection = Devices::new()?;
 
         let mut processes = Vec::new();
         for dev in dev_collection {
@@ -145,17 +203,49 @@ impl ProcessesManager {
         }
         Ok(processes)
     }
+
+    pub fn get_devices(&self) -> Result<Vec<Device>, ProcessesError> {
+        com_initialized();
+        let dev_collection = Devices::new()?;
+        Ok(dev_collection.map(Device::from).collect())
+    }
+
+    pub fn session_from_id(&self, searched_id: &SafeSessionId) -> Result<Session, ProcessesError> {
+        let dev_collection = Devices::new()?;
+        let searched_id = unsafe { searched_id.0.to_string() }.map_err(ProcessesError::RawStringParseError)?;
+        // This is a bit inefficient, but it's the only way, I found, to get the session reliably IAudioSessionManager::GetAudioSessionControl wasn't reliable
+        // It's still plenty fast, so it's not a big deal (on the order of tenths of microseconds)
+        for dev in dev_collection {
+            let dev: Device = dev.into();
+            let sessions = AudioSessions::new(dev.inner)?;
+            for session in sessions {
+                let id = unsafe {
+                    session
+                        .GetSessionInstanceIdentifier()
+                        .map_err(ProcessesError::DisplayNameError)?
+                        .to_string()
+                        .map_err(ProcessesError::RawStringParseError)?
+                };
+                if id == searched_id {
+                    return Ok(Session::from_session(session)?);
+                }
+            }
+        }
+        Err(ProcessesError::SessionNotFound)
+    }
 }
 
 // Once again, taken from CPAL, thank you!
-struct Devices {
+pub(crate) struct Devices {
     dev_collection: IMMDeviceCollection,
     dev_count: u32,
     next_index: u32,
 }
 
 impl Devices {
-    pub fn new(enumerator: &IMMDeviceEnumerator) -> Result<Self, ProcessesError> {
+    pub fn new() -> Result<Self, ProcessesError> {
+        let enumerator: IMMDeviceEnumerator =
+            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(ProcessesError::InstanceCreationError)?;
         let dev_collection =
             unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) }.map_err(ProcessesError::DeviceCollectionError)?;
         let dev_count = unsafe { dev_collection.GetCount() }.map_err(ProcessesError::DeviceCountError)?;
@@ -186,7 +276,7 @@ impl Iterator for Devices {
     }
 }
 
-struct AudioSessions {
+pub(crate) struct AudioSessions {
     session_enum: IAudioSessionEnumerator,
     session_count: i32,
     next_index: i32,
@@ -239,6 +329,6 @@ mod tests {
         assert!(p.is_ok());
 
         let p = p.unwrap();
-        assert!(p.query_sessions().is_ok());
+        assert!(p.get_sessions().is_ok());
     }
 }
