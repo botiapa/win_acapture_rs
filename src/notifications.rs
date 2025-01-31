@@ -1,3 +1,4 @@
+use std::fmt;
 use std::ops::Deref;
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
@@ -21,7 +22,7 @@ use windows::Win32::{
 use windows_core::{implement, IUnknown, Interface, PCWSTR, PWSTR};
 
 use crate::com::com_initialized;
-use crate::processes::{Device, Devices, ProcessesError, SafeSessionId, Session};
+use crate::manager::{AudioError, Device, Devices, SafeSessionId, Session};
 use crate::session_notification::{session_notification_thread, SessionCreated, SessionNotificationCommand, SessionNotificationMessage};
 
 pub struct Notifications {
@@ -51,7 +52,7 @@ pub enum NotificationError {
     #[error("Failed setting up notification through session manager: {0}")]
     FailedSettingUpNotification(windows::core::Error),
     #[error("Failed enumerating devices: {0}")]
-    FailedEnumeratingDevices(ProcessesError),
+    FailedEnumeratingDevices(AudioError),
     #[error("Failed activating session manager: {0}")]
     FailedActivatingSessionManager(windows::core::Error),
     #[error("Failed getting device id: {0}")]
@@ -122,8 +123,8 @@ impl Notifications {
 
     pub fn register_session_notification(
         &mut self,
-        callback_fn: impl Fn(SessionCreated) + Send + 'static + Clone + Sync,
         dev: Device,
+        callback_fn: impl Fn(SessionCreated) + Send + 'static + Clone + Sync,
     ) -> Result<(), NotificationError> {
         self.notification_thread_running()
             .map_err(|_| NotificationError::FailedStartingNotificationThread)?;
@@ -265,38 +266,56 @@ pub struct GroupingParamChangedArgs {
     eventcontext: *const windows_core::GUID,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StateChangedArgs {
     newstate: AudioSessionState,
 }
 
 impl StateChangedArgs {
-    pub fn get_state(&self) -> &AudioSessionState {
-        &self.newstate
+    pub fn get_state(&self) -> SessionState {
+        match self.newstate.0 {
+            0 => SessionState::AudioSessionStateInactive,
+            1 => SessionState::AudioSessionStateActive,
+            2 => SessionState::AudioSessionStateExpired,
+            _ => panic!("Unknown session state"),
+        }
     }
 }
 
-#[derive(Debug)]
-pub struct SessionDisconnectedArgs {
-    disconnectreason: AudioSessionDisconnectReason,
-}
-
 #[derive(Debug, Clone)]
-pub enum SessionDisconnectReason {
+pub enum SessionState {
     AudioSessionStateActive,
     AudioSessionStateExpired,
     AudioSessionStateInactive,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionDisconnectedArgs {
+    disconnectreason: AudioSessionDisconnectReason,
+}
+
 impl SessionDisconnectedArgs {
     pub fn get_reason(&self) -> SessionDisconnectReason {
         match self.disconnectreason.0 {
-            0 => SessionDisconnectReason::AudioSessionStateInactive,
-            1 => SessionDisconnectReason::AudioSessionStateActive,
-            2 => SessionDisconnectReason::AudioSessionStateExpired,
-            _ => panic!("Unknown disconnect reason"),
+            0 => SessionDisconnectReason::DisconnectReasonDeviceRemoval,
+            1 => SessionDisconnectReason::DisconnectReasonServerShutdown,
+            2 => SessionDisconnectReason::DisconnectReasonFormatChanged,
+            3 => SessionDisconnectReason::DisconnectReasonSessionLogoff,
+            4 => SessionDisconnectReason::DisconnectReasonSessionDisconnected,
+            5 => SessionDisconnectReason::DisconnectReasonExclusiveModeOverride,
+            _ => panic!("Invalid session disconnect reason"),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum SessionDisconnectReason {
+    DisconnectReasonDeviceRemoval,
+    DisconnectReasonServerShutdown,
+    DisconnectReasonFormatChanged,
+    DisconnectReasonSessionLogoff,
+    DisconnectReasonSessionDisconnected,
+    DisconnectReasonExclusiveModeOverride,
 }
 
 #[derive(Debug)]

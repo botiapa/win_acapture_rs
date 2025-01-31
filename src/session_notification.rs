@@ -12,7 +12,7 @@ use windows_core::{implement, Interface};
 
 use crate::{
     notifications::{self, NotificationError},
-    processes::{Device, ProcessesManager, SafeSessionId, Session},
+    manager::{Device, SessionManager, SafeSessionId, Session},
 };
 
 pub(crate) enum SessionNotificationMessage {
