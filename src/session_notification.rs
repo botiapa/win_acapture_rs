@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::mpsc};
 
-use log::debug;
+use log::{debug, trace};
 use windows::Win32::{
     Media::Audio::{
         IAudioSessionControl, IAudioSessionControl2, IAudioSessionManager2, IAudioSessionNotification, IAudioSessionNotification_Impl,
@@ -95,7 +95,7 @@ fn thread_inner(
                     .map_err(NotificationError::FailedActivatingSessionManager)?;
             }
 
-            debug!("Notification registered, notifications: {}", notifications.len());
+            trace!("Notification registered, notifications: {}", notifications.len());
             send.send(SessionNotificationMessage::NotificationRegistered)
                 .expect("Failed sending notification registered message");
         }
@@ -114,7 +114,7 @@ fn thread_inner(
                 send.send(SessionNotificationMessage::NotificationUnregistered)
                     .expect("Failed sending notification unregistered message");
             }
-            debug!("Notification unregistered, notifications: {}", notifications.len());
+            trace!("Notification unregistered, notifications: {}", notifications.len());
         }
         Ok(SessionNotificationCommand::Stop) => {
             // Unregister all notifications
