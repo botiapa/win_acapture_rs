@@ -1,16 +1,16 @@
-use std::{string::FromUtf16Error, time::Instant};
+use std::string::FromUtf16Error;
 
 use thiserror::Error;
 use windows::Win32::{
     Foundation::S_OK,
     Media::Audio::{
         eRender, AudioSessionStateActive, AudioSessionStateExpired, AudioSessionStateInactive, IAudioSessionControl, IAudioSessionControl2,
-        IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator, In, MMDeviceEnumerator,
+        IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator, MMDeviceEnumerator,
         DEVICE_STATE_ACTIVE,
     },
     System::Com::{CoCreateInstance, CLSCTX_ALL},
 };
-use windows_core::{Interface, GUID, PWSTR};
+use windows_core::{Interface, PWSTR};
 
 use crate::com::com_initialized;
 
@@ -171,6 +171,7 @@ pub enum AudioSessionState {
 }
 
 impl From<windows::Win32::Media::Audio::AudioSessionState> for AudioSessionState {
+    #[allow(non_upper_case_globals)]
     fn from(state: windows::Win32::Media::Audio::AudioSessionState) -> Self {
         match state {
             AudioSessionStateInactive => AudioSessionState::AudioSessionStateInactive,

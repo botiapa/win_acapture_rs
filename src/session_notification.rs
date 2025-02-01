@@ -1,18 +1,17 @@
-use std::{collections::HashMap, ops::Deref, sync::mpsc, thread};
+use std::{collections::HashMap, sync::mpsc};
 
 use log::debug;
 use windows::Win32::{
     Media::Audio::{
         IAudioSessionControl, IAudioSessionControl2, IAudioSessionManager2, IAudioSessionNotification, IAudioSessionNotification_Impl,
-        IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
     },
-    System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED},
+    System::Com::{CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED},
 };
 use windows_core::{implement, Interface};
 
 use crate::{
-    notifications::{self, NotificationError},
-    manager::{Device, SessionManager, SafeSessionId, Session},
+    manager::{Device, SafeSessionId, Session},
+    notifications::NotificationError,
 };
 
 pub(crate) enum SessionNotificationMessage {

@@ -1,16 +1,10 @@
-use std::fmt;
-use std::ops::Deref;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self};
 use std::thread::{self, JoinHandle};
 use std::{collections::HashMap, string::FromUtf16Error};
 
 use log::trace;
 use thiserror::Error;
-use windows::Win32::Media::Audio::{
-    self, AudioSessionDisconnectReason, AudioSessionState, IAudioSessionControl, IAudioSessionControl2, IAudioSessionManager2,
-    IAudioSessionNotification, IAudioSessionNotification_Impl, IMMDevice,
-};
-use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+use windows::Win32::Media::Audio::{AudioSessionDisconnectReason, AudioSessionState, IAudioSessionControl2};
 use windows::Win32::{
     Foundation::{self, PROPERTYKEY},
     Media::Audio::{
@@ -19,10 +13,10 @@ use windows::Win32::{
     },
     System::Com::{CoCreateInstance, CLSCTX_ALL},
 };
-use windows_core::{implement, IUnknown, Interface, PCWSTR, PWSTR};
+use windows_core::{implement, PCWSTR, PWSTR};
 
 use crate::com::com_initialized;
-use crate::manager::{AudioError, Device, Devices, SafeSessionId, Session};
+use crate::manager::{AudioError, Device, SafeSessionId, Session};
 use crate::session_notification::{session_notification_thread, SessionCreated, SessionNotificationCommand, SessionNotificationMessage};
 
 pub struct Notifications {

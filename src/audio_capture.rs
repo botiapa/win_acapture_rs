@@ -79,6 +79,10 @@ impl AudioCapture {
         Ok(())
     }
 
+    pub fn get_format(&self) -> SampleFormat {
+        self._format.clone()
+    }
+
     pub fn start_recording<D, E>(&mut self, pid: u32, data_callback: D, mut error_callback: E)
     where
         D: FnMut(&[u8]) + Send + 'static,
