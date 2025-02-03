@@ -14,7 +14,7 @@ use windows::{
         Foundation::{self, HANDLE, WAIT_FAILED, WAIT_OBJECT_0, WIN32_ERROR},
         Media::Audio::*,
         System::{
-            Com::{self, StructuredStorage::PROPVARIANT, CLSCTX},
+            Com::{self, StructuredStorage::PROPVARIANT},
             Threading::{
                 CreateEventA, CreateEventW, GetCurrentThread, SetEvent, SetThreadPriority, WaitForMultipleObjectsEx, INFINITE,
                 THREAD_PRIORITY_TIME_CRITICAL,
@@ -36,6 +36,7 @@ struct RunContext {
     audio_client: IAudioClient,
     capture_client: IAudioCaptureClient,
     stop_handle: HANDLE,
+    format: SampleFormat,
 }
 unsafe impl Send for RunContext {}
 
@@ -105,6 +106,7 @@ impl AudioCapture {
             audio_client,
             capture_client,
             stop_handle,
+            format: self._format.clone(),
         };
 
         let thr = thread::spawn(move || {
@@ -139,6 +141,7 @@ impl AudioCapture {
             audio_client,
             capture_client,
             stop_handle,
+            format: self._format.clone(),
         };
 
         let thr = thread::spawn(move || {
@@ -173,12 +176,10 @@ impl AudioCapture {
         let audio_client = activated_interface.unwrap().cast::<IAudioClient>().unwrap();
         let capture_format = self._format.clone().into();
 
-        //let capture_format = self._format.clone().to_wave_format_ex();
-
         unsafe {
             audio_client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
-                AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                 200000,
                 0,
                 &capture_format as *const WAVEFORMATEX,
@@ -198,7 +199,7 @@ impl AudioCapture {
         unsafe {
             audio_client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
-                AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
                 200000,
                 0,
                 &capture_format,
@@ -263,7 +264,8 @@ impl AudioCapture {
             .map_err(|h| RecordingError::FailedGettingBuffer(h))?;
             debug_assert!(!buffer.is_null());
 
-            let buf_slice = unsafe { std::slice::from_raw_parts(buffer, frames_available as usize * 4) };
+            let buf_slice =
+                unsafe { std::slice::from_raw_parts(buffer, frames_available as usize * run_context.format.block_align() as usize) };
             data_callback(buf_slice);
 
             unsafe { capture_client.ReleaseBuffer(frames_available) }.map_err(|h| RecordingError::FailedReleasingBuffer(h))?;

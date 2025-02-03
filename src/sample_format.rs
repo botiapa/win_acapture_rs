@@ -1,6 +1,6 @@
 use windows::Win32::Media::{
-    Audio::{WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVEFORMATEXTENSIBLE_0, WAVE_FORMAT_PCM},
-    KernelStreaming::{KSAUDIO_SPEAKER_DIRECTOUT, KSDATAFORMAT_SUBTYPE_PCM, WAVE_FORMAT_EXTENSIBLE},
+    Audio::{WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVE_FORMAT_PCM},
+    KernelStreaming::{KSDATAFORMAT_SUBTYPE_PCM, WAVE_FORMAT_EXTENSIBLE},
     Multimedia::{KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, WAVE_FORMAT_IEEE_FLOAT},
 };
 use windows_core::GUID;
@@ -49,10 +49,10 @@ impl SampleFormat {
 
     pub const fn default() -> Self {
         Self {
-            format_tag: FormatTag::WaveFormatPcm,
+            format_tag: FormatTag::WaveFormatIeeeFloat,
             channels: 2,
             sample_rate: 44100,
-            bits_per_sample: 16,
+            bits_per_sample: 32,
         }
     }
 
@@ -121,7 +121,7 @@ impl FormatTag {
     pub fn to_wave_format_tag(&self) -> u16 {
         match self {
             FormatTag::WaveFormatPcm => WAVE_FORMAT_PCM as u16,
-            FormatTag::WaveFormatIeeeFloat => WAVE_FORMAT_EXTENSIBLE as u16,
+            FormatTag::WaveFormatIeeeFloat => WAVE_FORMAT_IEEE_FLOAT as u16,
             FormatTag::WaveFormatExtensible => WAVE_FORMAT_EXTENSIBLE as u16,
             FormatTag::Unsupported => 0,
         }

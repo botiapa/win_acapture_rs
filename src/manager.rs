@@ -5,10 +5,9 @@ use windows::Win32::{
     Devices::Properties,
     Foundation::{self, S_FALSE, S_OK},
     Media::Audio::{
-        eCapture, eRender, AudioSessionStateActive, AudioSessionStateExpired, AudioSessionStateInactive, DataFlow, EDataFlow,
-        IAudioSessionControl, IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceCollection,
-        IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_E_UNSUPPORTED_FORMAT, AUDCLNT_SHAREMODE_SHARED, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
-        WAVEFORMATEXTENSIBLE,
+        eCapture, eRender, AudioSessionStateActive, AudioSessionStateExpired, AudioSessionStateInactive, EDataFlow, IAudioSessionControl,
+        IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator,
+        MMDeviceEnumerator, AUDCLNT_E_UNSUPPORTED_FORMAT, AUDCLNT_SHAREMODE_SHARED, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
     },
     System::{
         Com::{self, CoCreateInstance, CLSCTX_ALL, STGM_READ},
@@ -448,7 +447,6 @@ mod tests {
         let devs = DeviceManager::get_capture_devices().unwrap();
         let dev = devs.first().unwrap();
         let format = dev.get_mix_format().unwrap();
-        print!("{:?}", format);
         dev.format_supported(&format.into()).unwrap();
     }
 
