@@ -1,18 +1,23 @@
-use std::string::FromUtf16Error;
+use std::{ops::Deref, string::FromUtf16Error};
 
 use thiserror::Error;
 use windows::Win32::{
-    Foundation::S_OK,
+    Devices::Properties,
+    Foundation::{self, S_FALSE, S_OK},
     Media::Audio::{
-        eRender, AudioSessionStateActive, AudioSessionStateExpired, AudioSessionStateInactive, IAudioSessionControl, IAudioSessionControl2,
-        IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator, MMDeviceEnumerator,
-        DEVICE_STATE_ACTIVE,
+        eCapture, eRender, AudioSessionStateActive, AudioSessionStateExpired, AudioSessionStateInactive, DataFlow, EDataFlow,
+        IAudioSessionControl, IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceCollection,
+        IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_E_UNSUPPORTED_FORMAT, AUDCLNT_SHAREMODE_SHARED, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
+        WAVEFORMATEXTENSIBLE,
     },
-    System::Com::{CoCreateInstance, CLSCTX_ALL},
+    System::{
+        Com::{self, CoCreateInstance, CLSCTX_ALL, STGM_READ},
+        Variant::VT_LPWSTR,
+    },
 };
 use windows_core::{Interface, PWSTR};
 
-use crate::com::com_initialized;
+use crate::{com::com_initialized, sample_format::SampleFormat};
 
 #[derive(Error, Debug)]
 pub enum AudioError {
@@ -48,6 +53,14 @@ pub enum AudioError {
     GetSessionError(windows::core::Error),
     #[error("Failed to find session with given id")]
     SessionNotFound,
+    #[error("Failed reading from property store: {0}")]
+    PropertyStoreError(windows::core::Error),
+    #[error("Read invalid prop variant")]
+    InvalidPropVariant,
+    #[error("Failed getting mix format: {0}")]
+    FailedGettingMixFormat(windows::core::Error),
+    #[error("Failed reading closest format match")]
+    FailedReadingClosestFormatMatch,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -142,22 +155,118 @@ impl Session {
     }
 }
 
+struct WaveFormatExPtr(*mut WAVEFORMATEX);
+
+impl Deref for WaveFormatExPtr {
+    type Target = *mut WAVEFORMATEX;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for WaveFormatExPtr {
+    fn drop(&mut self) {
+        unsafe {
+            Com::CoTaskMemFree(Some(self.0 as *mut _));
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Device {
     pub(crate) inner: IMMDevice,
+    pub(crate) is_playback: bool,
 }
 
 unsafe impl Send for Device {}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FormatSupport {
+    Supported,
+    Unsupported,
+    ClosestMatch(SampleFormat),
+}
 
 impl Device {
     pub fn get_id(&self) -> Result<String, AudioError> {
         let id = unsafe { self.inner.GetId() }.map_err(AudioError::DeviceError)?;
         Ok(unsafe { id.to_string() }.map_err(AudioError::RawStringParseError)?)
     }
+
+    pub fn get_friendly_name(&self) -> Result<String, AudioError> {
+        let prop_key: *const Foundation::PROPERTYKEY = &Properties::DEVPKEY_Device_FriendlyName as *const _ as *const _;
+        self.read_string_property(prop_key)
+    }
+
+    pub fn get_mix_format(&self) -> Result<SampleFormat, AudioError> {
+        com_initialized();
+        let audio_client = unsafe { self.inner.Activate::<windows::Win32::Media::Audio::IAudioClient>(CLSCTX_ALL, None) }
+            .map_err(AudioError::DeviceActivationError)?;
+        let mix_format = unsafe {
+            audio_client
+                .GetMixFormat()
+                .map(WaveFormatExPtr)
+                .map_err(AudioError::FailedGettingMixFormat)?
+        };
+        let mix_format: SampleFormat = SampleFormat::from_wave_format_ex(mix_format.0 as *const WAVEFORMATEX);
+        Ok(mix_format)
+    }
+
+    pub fn format_supported(&self, format: &SampleFormat) -> Result<FormatSupport, AudioError> {
+        com_initialized();
+        let audio_client = unsafe { self.inner.Activate::<windows::Win32::Media::Audio::IAudioClient>(CLSCTX_ALL, None) }
+            .map_err(AudioError::DeviceActivationError)?;
+        let mut closest_match_ptr: *mut WAVEFORMATEX = std::ptr::null_mut();
+        let wave_format: WAVEFORMATEX = format.clone().into();
+        let hr = unsafe {
+            audio_client.IsFormatSupported(
+                AUDCLNT_SHAREMODE_SHARED,
+                &wave_format,
+                Some(&mut closest_match_ptr as *mut *mut WAVEFORMATEX),
+            )
+        };
+        let closest_match = WaveFormatExPtr(closest_match_ptr);
+
+        if hr == S_OK {
+            Ok(FormatSupport::Supported)
+        } else if hr == AUDCLNT_E_UNSUPPORTED_FORMAT {
+            Ok(FormatSupport::Unsupported)
+        } else if hr == S_FALSE {
+            if closest_match_ptr.is_null() {
+                return Err(AudioError::FailedReadingClosestFormatMatch);
+            }
+            let closest_match: SampleFormat = SampleFormat::from_wave_format_ex(closest_match.0 as *const WAVEFORMATEX);
+            Ok(FormatSupport::ClosestMatch(closest_match))
+        } else {
+            panic!("Unexpected error code: {}", hr);
+        }
+    }
+
+    pub(crate) fn from(dev: IMMDevice, is_playback: bool) -> Self {
+        Self { inner: dev, is_playback }
+    }
+
+    fn read_string_property(&self, prop_key: *const Foundation::PROPERTYKEY) -> Result<String, AudioError> {
+        let store = unsafe { self.inner.OpenPropertyStore(STGM_READ) }.map_err(AudioError::PropertyStoreError)?;
+        let propvar = unsafe { store.GetValue(prop_key).map_err(AudioError::PropertyStoreError)? };
+        let propvar = unsafe { &propvar.Anonymous.Anonymous };
+        if propvar.vt != VT_LPWSTR {
+            return Err(AudioError::InvalidPropVariant);
+        }
+
+        let ptr = unsafe { *(&propvar.Anonymous as *const _ as *const *mut u16) };
+        let str = PWSTR::from_raw(ptr);
+        Ok(unsafe { str.to_string() }.map_err(AudioError::RawStringParseError)?)
+    }
 }
 
-impl From<IMMDevice> for Device {
-    fn from(dev: IMMDevice) -> Self {
-        Self { inner: dev }
+impl PartialEq for Device {
+    fn eq(&self, other: &Self) -> bool {
+        match (self.get_id(), other.get_id()) {
+            (Ok(id1), Ok(id2)) => id1 == id2,
+            _ => false,
+        }
     }
 }
 
@@ -186,7 +295,7 @@ impl SessionManager {
     /// Queries all active audio sessions
     pub fn get_sessions() -> Result<Vec<Session>, AudioError> {
         com_initialized();
-        let dev_collection = Devices::new()?;
+        let dev_collection = Devices::new(eRender)?;
 
         let mut processes = Vec::new();
         for dev in dev_collection {
@@ -202,12 +311,12 @@ impl SessionManager {
     }
 
     pub fn session_from_id(searched_id: &SafeSessionId) -> Result<Session, AudioError> {
-        let dev_collection = Devices::new()?;
+        let dev_collection = Devices::new(eRender)?;
         let searched_id = unsafe { searched_id.0.to_string() }.map_err(AudioError::RawStringParseError)?;
         // This is a bit inefficient, but it's the only way, I found, to get the session reliably IAudioSessionManager::GetAudioSessionControl wasn't reliable
         // It's still plenty fast, so it's not a big deal (on the order of tenths of microseconds)
         for dev in dev_collection {
-            let dev: Device = dev.into();
+            let dev: Device = Device::from(dev, true);
             let sessions = AudioSessions::new(dev.inner)?;
             for session in sessions {
                 let id = unsafe {
@@ -229,10 +338,16 @@ impl SessionManager {
 pub struct DeviceManager {}
 
 impl DeviceManager {
-    pub fn get_devices() -> Result<Vec<Device>, AudioError> {
+    pub fn get_playback_devices() -> Result<Vec<Device>, AudioError> {
         com_initialized();
-        let dev_collection = Devices::new()?;
-        Ok(dev_collection.map(Device::from).collect())
+        let dev_collection = Devices::new(eRender)?;
+        Ok(dev_collection.map(|d| Device::from(d, true)).collect())
+    }
+
+    pub fn get_capture_devices() -> Result<Vec<Device>, AudioError> {
+        com_initialized();
+        let dev_collection = Devices::new(eCapture)?;
+        Ok(dev_collection.map(|d| Device::from(d, false)).collect())
     }
 }
 
@@ -244,11 +359,11 @@ pub(crate) struct Devices {
 }
 
 impl Devices {
-    pub fn new() -> Result<Self, AudioError> {
+    pub(crate) fn new(dataflow: EDataFlow) -> Result<Self, AudioError> {
         let enumerator: IMMDeviceEnumerator =
             unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(AudioError::InstanceCreationError)?;
         let dev_collection =
-            unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) }.map_err(AudioError::DeviceCollectionError)?;
+            unsafe { enumerator.EnumAudioEndpoints(dataflow, DEVICE_STATE_ACTIVE) }.map_err(AudioError::DeviceCollectionError)?;
         let dev_count = unsafe { dev_collection.GetCount() }.map_err(AudioError::DeviceCountError)?;
         Ok(Self {
             dev_collection,
@@ -325,8 +440,23 @@ mod tests {
 
     #[test]
     fn test_sessions() {
-        com_initialized();
-
         assert!(SessionManager::get_sessions().is_ok());
+    }
+
+    #[test]
+    fn test_default_format() {
+        let devs = DeviceManager::get_capture_devices().unwrap();
+        let dev = devs.first().unwrap();
+        let format = dev.get_mix_format().unwrap();
+        print!("{:?}", format);
+        dev.format_supported(&format.into()).unwrap();
+    }
+
+    #[test]
+    fn test_device() {
+        let devs = DeviceManager::get_capture_devices().unwrap();
+        let dev = devs.first().unwrap();
+        assert!(dev.get_id().is_ok());
+        assert!(dev.get_friendly_name().is_ok());
     }
 }

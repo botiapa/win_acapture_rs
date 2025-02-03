@@ -1,8 +1,9 @@
 use std::io::stdin;
 
 use win_acapture_rs::{
+    event_args::AudioSessionEventArgs,
     manager::{DeviceManager, SessionManager},
-    notifications::{AudioSessionEventArgs, Notifications},
+    notifications::Notifications,
     session_notification::SessionCreated,
 };
 
@@ -17,7 +18,7 @@ fn main() {
     }
 
     // Set up session notification (NewSession) tied to devices
-    let devices = DeviceManager::get_devices().unwrap();
+    let devices = DeviceManager::get_playback_devices().unwrap();
     for dev in devices {
         notification_manager
             .register_session_notification(dev, handle_notification)

@@ -16,18 +16,13 @@ use windows::Win32::{
 use windows_core::{implement, PCWSTR, PWSTR};
 
 use crate::com::com_initialized;
+use crate::event_args::{
+    AudioSessionEventArgs, ChannelVolumeChangedArgs, DefaultDeviceChangedEventArgs, DeviceAddedEventArgs, DeviceNotificationEventArgs,
+    DevicePropertyValueChangedEventArgs, DeviceRemovedEventArgs, DeviceStateChangedEventArgs, DisplayNameChangedArgs,
+    GroupingParamChangedArgs, IconPathChangedArgs, SessionDisconnectedArgs, SimpleVolumeChangedArgs, StateChangedArgs,
+};
 use crate::manager::{AudioError, Device, SafeSessionId, Session};
 use crate::session_notification::{session_notification_thread, SessionCreated, SessionNotificationCommand, SessionNotificationMessage};
-
-pub struct Notifications {
-    _device_notification_client: Option<(IMMDeviceEnumerator, IMMNotificationClient)>,
-    _session_event_client: HashMap<String, (IAudioSessionControl2, IAudioSessionEvents)>,
-    _session_notification: Option<(
-        mpsc::Sender<SessionNotificationCommand>,
-        mpsc::Receiver<SessionNotificationMessage>,
-        JoinHandle<()>,
-    )>,
-}
 
 #[derive(Error, Debug)]
 pub enum NotificationError {
@@ -61,6 +56,16 @@ pub enum NotificationError {
     SessionNotificationThreadNotRunning,
 }
 
+pub struct Notifications {
+    _device_notification_client: Option<(IMMDeviceEnumerator, IMMNotificationClient)>,
+    _session_event_client: HashMap<String, (IAudioSessionControl2, IAudioSessionEvents)>,
+    _session_notification: Option<(
+        mpsc::Sender<SessionNotificationCommand>,
+        mpsc::Receiver<SessionNotificationMessage>,
+        JoinHandle<()>,
+    )>,
+}
+
 impl Notifications {
     pub fn new() -> Self {
         Self {
@@ -69,21 +74,6 @@ impl Notifications {
             _session_notification: None,
         }
     }
-
-    pub fn setup_notifications(&mut self) -> Result<(), NotificationError> {
-        if self._device_notification_client.is_some() {
-            return Err(NotificationError::NotificationAlreadyRegistered);
-        }
-        com_initialized();
-        let device_enumerator: IMMDeviceEnumerator =
-            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(NotificationError::InstanceCreationError)?;
-        let nclient: IMMNotificationClient = IDeviceNotificationClient::new().into();
-        unsafe { device_enumerator.RegisterEndpointNotificationCallback(&nclient) }
-            .map_err(NotificationError::NotificationRegisterError)?;
-        self._device_notification_client = Some((device_enumerator, nclient));
-        Ok(())
-    }
-
     pub fn register_session_event<CB>(&mut self, session: &Session, callback_fn: CB) -> Result<(), NotificationError>
     where
         CB: Fn(AudioSessionEventArgs) + Send + 'static,
@@ -144,6 +134,32 @@ impl Notifications {
         }
     }
 
+    pub fn register_device_notification<CB>(&mut self, callback_fn: CB) -> Result<(), NotificationError>
+    where
+        CB: Fn(DeviceNotificationEventArgs) + Send + 'static,
+    {
+        if self._device_notification_client.is_some() {
+            return Err(NotificationError::NotificationAlreadyRegistered);
+        }
+        com_initialized();
+        let device_enumerator: IMMDeviceEnumerator =
+            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(NotificationError::InstanceCreationError)?;
+        let nclient: IMMNotificationClient = IDeviceNotificationClient::new(callback_fn).into();
+
+        unsafe { device_enumerator.RegisterEndpointNotificationCallback(&nclient) }
+            .map_err(NotificationError::NotificationRegisterError)?;
+        self._device_notification_client = Some((device_enumerator, nclient));
+        Ok(())
+    }
+
+    pub fn unregister_device_notification(&mut self) -> Result<(), NotificationError> {
+        if let Some((enumerator, nclient)) = self._device_notification_client.take() {
+            unsafe { enumerator.UnregisterEndpointNotificationCallback(&nclient) }
+                .map_err(NotificationError::NotificationUnregisterError)?;
+        }
+        Ok(())
+    }
+
     fn notification_thread_running(&mut self) -> Result<(), NotificationError> {
         if self._session_notification.is_some() {
             return Ok(());
@@ -170,6 +186,7 @@ impl Drop for Notifications {
                     .UnregisterEndpointNotificationCallback(&nclient)
                     .expect("Failed unregistering notification client");
             };
+            trace!("Device notification unregistered");
         }
 
         for (_, (sc, nc)) in self._session_event_client.drain() {
@@ -177,150 +194,77 @@ impl Drop for Notifications {
                 sc.UnregisterAudioSessionNotification(&nc)
                     .expect("Failed unregistering session notification client");
             };
+            trace!("Session event unregistered");
         }
 
         if let Some((send, recv, t)) = self._session_notification.take() {
             send.send(SessionNotificationCommand::Stop).unwrap();
             t.join().unwrap();
+            trace!("Session notification thread stopped");
         }
     }
 }
 
 #[implement(IMMNotificationClient)]
-struct IDeviceNotificationClient {}
+struct IDeviceNotificationClient<CB>
+where
+    CB: Fn(DeviceNotificationEventArgs) + Send + 'static,
+{
+    callback_fn: CB,
+}
 
-impl IDeviceNotificationClient {
-    pub fn new() -> Self {
-        Self {}
+impl<CB> IDeviceNotificationClient<CB>
+where
+    CB: Fn(DeviceNotificationEventArgs) + Send + 'static,
+{
+    pub fn new(callback_fn: CB) -> Self {
+        Self { callback_fn }
     }
 }
 
-impl IMMNotificationClient_Impl for IDeviceNotificationClient_Impl {
+impl<CB> IMMNotificationClient_Impl for IDeviceNotificationClient_Impl<CB>
+where
+    CB: Fn(DeviceNotificationEventArgs) + Send + 'static,
+{
     fn OnDefaultDeviceChanged(&self, flow: EDataFlow, role: ERole, pwstrDefaultDevice: &PCWSTR) -> windows::core::Result<()> {
-        println!("Default device changed");
-        todo!()
+        (self.callback_fn)(DeviceNotificationEventArgs::DefaultDeviceChanged(DefaultDeviceChangedEventArgs {
+            flow,
+            role,
+            defaultdevice: pwstrDefaultDevice.clone(),
+        }));
+        Ok(())
     }
 
     fn OnDeviceAdded(&self, pwstrDeviceId: &PCWSTR) -> windows::core::Result<()> {
-        println!("Device added");
-        todo!()
+        (self.callback_fn)(DeviceNotificationEventArgs::DeviceAdded(DeviceAddedEventArgs {
+            pwstrDeviceId: pwstrDeviceId.clone(),
+        }));
+        Ok(())
     }
 
     fn OnDeviceRemoved(&self, pwstrDeviceId: &PCWSTR) -> windows::core::Result<()> {
-        println!("Device removed");
-        todo!()
+        (self.callback_fn)(DeviceNotificationEventArgs::DeviceRemoved(DeviceRemovedEventArgs {
+            pwstrDeviceId: pwstrDeviceId.clone(),
+        }));
+        Ok(())
     }
 
     fn OnDeviceStateChanged(&self, pwstrDeviceId: &PCWSTR, dwNewState: DEVICE_STATE) -> windows::core::Result<()> {
-        println!("Device state changed");
-        todo!()
+        (self.callback_fn)(DeviceNotificationEventArgs::DeviceStateChanged(DeviceStateChangedEventArgs {
+            pwstrDeviceId: pwstrDeviceId.clone(),
+            dwNewState,
+        }));
+        Ok(())
     }
 
     fn OnPropertyValueChanged(&self, pwstrDeviceId: &PCWSTR, key: &PROPERTYKEY) -> windows::core::Result<()> {
-        println!("Property value changed");
-        todo!()
-    }
-}
-
-#[derive(Debug)]
-pub enum AudioSessionEventArgs {
-    DisplayNameChanged(DisplayNameChangedArgs),
-    IconPathChanged(IconPathChangedArgs),
-    SimpleVolumeChanged(SimpleVolumeChangedArgs),
-    ChannelVolumeChanged(ChannelVolumeChangedArgs),
-    GroupingParamChanged(GroupingParamChangedArgs),
-    StateChanged(StateChangedArgs),
-    SessionDisconnected(SessionDisconnectedArgs),
-}
-
-#[derive(Debug)]
-pub struct DisplayNameChangedArgs {
-    newdisplayname: PCWSTR,
-    eventcontext: *const windows_core::GUID,
-}
-
-#[derive(Debug)]
-pub struct SimpleVolumeChangedArgs {
-    newvolume: f32,
-    newmute: Foundation::BOOL,
-    eventcontext: *const windows_core::GUID,
-}
-
-#[derive(Debug)]
-pub struct ChannelVolumeChangedArgs {
-    channelcount: u32,
-    newchannelvolumearray: *const f32,
-    changedchannel: u32,
-    eventcontext: *const windows_core::GUID,
-}
-
-#[derive(Debug)]
-pub struct GroupingParamChangedArgs {
-    newgroupingparam: *const windows_core::GUID,
-    eventcontext: *const windows_core::GUID,
-}
-
-#[derive(Debug, Clone)]
-pub struct StateChangedArgs {
-    newstate: AudioSessionState,
-}
-
-impl StateChangedArgs {
-    pub fn get_state(&self) -> SessionState {
-        match self.newstate.0 {
-            0 => SessionState::AudioSessionStateInactive,
-            1 => SessionState::AudioSessionStateActive,
-            2 => SessionState::AudioSessionStateExpired,
-            _ => panic!("Unknown session state"),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum SessionState {
-    AudioSessionStateActive,
-    AudioSessionStateExpired,
-    AudioSessionStateInactive,
-}
-
-#[derive(Debug, Clone)]
-pub struct SessionDisconnectedArgs {
-    disconnectreason: AudioSessionDisconnectReason,
-}
-
-impl SessionDisconnectedArgs {
-    pub fn get_reason(&self) -> SessionDisconnectReason {
-        match self.disconnectreason.0 {
-            0 => SessionDisconnectReason::DisconnectReasonDeviceRemoval,
-            1 => SessionDisconnectReason::DisconnectReasonServerShutdown,
-            2 => SessionDisconnectReason::DisconnectReasonFormatChanged,
-            3 => SessionDisconnectReason::DisconnectReasonSessionLogoff,
-            4 => SessionDisconnectReason::DisconnectReasonSessionDisconnected,
-            5 => SessionDisconnectReason::DisconnectReasonExclusiveModeOverride,
-            _ => panic!("Invalid session disconnect reason"),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum SessionDisconnectReason {
-    DisconnectReasonDeviceRemoval,
-    DisconnectReasonServerShutdown,
-    DisconnectReasonFormatChanged,
-    DisconnectReasonSessionLogoff,
-    DisconnectReasonSessionDisconnected,
-    DisconnectReasonExclusiveModeOverride,
-}
-
-#[derive(Debug)]
-pub struct IconPathChangedArgs {
-    newiconpath: PCWSTR,
-    eventcontext: *const windows_core::GUID,
-}
-
-impl IconPathChangedArgs {
-    pub fn get_icon_path(&self) -> Result<String, NotificationError> {
-        unsafe { self.newiconpath.to_string() }.map_err(NotificationError::PCWSTRConversionError)
+        (self.callback_fn)(DeviceNotificationEventArgs::DevicePropertyValueChanged(
+            DevicePropertyValueChangedEventArgs {
+                pwstrDeviceId: pwstrDeviceId.clone(),
+                key: key.clone(),
+            },
+        ));
+        Ok(())
     }
 }
 
