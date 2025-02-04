@@ -16,7 +16,7 @@ use windows::Win32::{
 };
 use windows_core::{Interface, PWSTR};
 
-use crate::{com::com_initialized, sample_format::SampleFormat};
+use crate::{com::com_initialized, event_args::DeviceState, sample_format::SampleFormat};
 
 #[derive(Error, Debug)]
 pub enum AudioError {
@@ -191,6 +191,11 @@ impl Device {
     pub fn get_id(&self) -> Result<String, AudioError> {
         let id = unsafe { self.inner.GetId() }.map_err(AudioError::DeviceError)?;
         Ok(unsafe { id.to_string() }.map_err(AudioError::RawStringParseError)?)
+    }
+
+    pub fn get_state(&self) -> Result<DeviceState, AudioError> {
+        let state = unsafe { self.inner.GetState() }.map_err(AudioError::GetStateError)?;
+        Ok(state.into())
     }
 
     pub fn get_friendly_name(&self) -> Result<String, AudioError> {

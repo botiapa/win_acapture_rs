@@ -1,3 +1,6 @@
+use core::fmt;
+use std::fmt::Display;
+
 use windows::Win32::Media::{
     Audio::{WAVEFORMATEX, WAVEFORMATEXTENSIBLE, WAVE_FORMAT_PCM},
     KernelStreaming::{KSDATAFORMAT_SUBTYPE_PCM, WAVE_FORMAT_EXTENSIBLE},
@@ -11,6 +14,16 @@ pub struct SampleFormat {
     channels: u16,
     sample_rate: u32,
     bits_per_sample: u16,
+}
+
+impl Display for SampleFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{{ {:?} {}bit, {}HZ {}ch  }}",
+            self.format_tag, self.bits_per_sample, self.sample_rate, self.channels
+        )
+    }
 }
 
 impl SampleFormat {
