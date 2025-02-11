@@ -172,6 +172,13 @@ impl Drop for WaveFormatExPtr {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum FormatSupport {
+    Supported,
+    Unsupported,
+    ClosestMatch(SampleFormat),
+}
+
 #[derive(Debug, Clone)]
 pub struct Device {
     pub(crate) inner: IMMDevice,
@@ -179,13 +186,6 @@ pub struct Device {
 }
 
 unsafe impl Send for Device {}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum FormatSupport {
-    Supported,
-    Unsupported,
-    ClosestMatch(SampleFormat),
-}
 
 impl Device {
     pub fn get_id(&self) -> Result<String, AudioError> {
