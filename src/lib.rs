@@ -1,6 +1,6 @@
 pub mod activation_params;
-pub mod audio_capture;
-pub mod capture_stream;
+pub mod audio_client;
+pub mod audio_stream;
 pub mod com;
 pub mod event_args;
 pub mod manager;

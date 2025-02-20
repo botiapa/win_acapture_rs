@@ -5,16 +5,16 @@ use std::{
     time::Duration,
 };
 
-use crate::{activation_params::SafeActivationParams, capture_stream::CaptureStream, sample_format::SampleFormat};
+use crate::{activation_params::SafeActivationParams, audio_stream::AudioStream, sample_format::SampleFormat};
 use crate::{com::com_initialized, manager::Device};
 use log::{error, trace};
 use windows::{
     core::{IUnknown, Interface, GUID, HRESULT},
     Win32::{
         Foundation::{self, CloseHandle, HANDLE, WAIT_EVENT, WAIT_FAILED, WIN32_ERROR},
-        Media::Audio::*,
+        Media::{Audio::*, Multimedia::WAVE_FORMAT_IEEE_FLOAT},
         System::{
-            Com::{self, StructuredStorage::PROPVARIANT},
+            Com::{self, CoTaskMemFree, StructuredStorage::PROPVARIANT},
             Threading::{CreateEventW, SetEvent, WaitForSingleObject, INFINITE},
         },
     },
@@ -22,7 +22,7 @@ use windows::{
 use windows_core::implement;
 
 #[derive(Debug, Clone)]
-pub enum RecordingError {
+pub enum AudioError {
     FailedToCreateStopEvent(windows_core::Error),
     FailedToSetupEventHandle(windows_core::Error),
     FailedToStartAudioClient(windows_core::Error),
@@ -32,12 +32,13 @@ pub enum RecordingError {
     FailedStoppingAudioClient(windows_core::Error),
     FailedResettingAudioClient(windows_core::Error),
     NotInputDevice,
+    NotPlaybackDevice,
     RecordingAlreadyStarted,
     FailedGettingActivationResult,
     EventCreationError(windows_core::Error),
 }
 
-impl Display for RecordingError {
+impl Display for AudioError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Recording error: {:?}", self)
     }
@@ -61,18 +62,42 @@ impl Deref for EventHandleWrapper {
     }
 }
 
-pub struct AudioCapture {
+pub struct WaveFormatWrapper(*mut WAVEFORMATEX);
+
+impl WaveFormatWrapper {
+    fn from_ptr(ptr: *mut WAVEFORMATEX) -> Self {
+        Self(ptr)
+    }
+}
+
+impl Deref for WaveFormatWrapper {
+    type Target = *mut WAVEFORMATEX;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for WaveFormatWrapper {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CoTaskMemFree(Some(self.0 as _));
+        }
+    }
+}
+
+pub struct AudioClient {
     format: SampleFormat,
 }
 
-impl AudioCapture {
+impl AudioClient {
     pub fn new() -> Self {
         Self {
             format: SampleFormat::default(),
         }
     }
 
-    pub fn set_format(&mut self, format: SampleFormat) -> Result<(), RecordingError> {
+    pub fn set_format(&mut self, format: SampleFormat) -> Result<(), AudioError> {
         self.format = format;
         Ok(())
     }
@@ -82,10 +107,10 @@ impl AudioCapture {
     }
 
     /// Start recording audio from a process
-    pub fn start_recording_process<D, E>(mut self, pid: u32, data_callback: D, error_callback: E) -> Result<CaptureStream, RecordingError>
+    pub fn start_recording_process<D, E>(mut self, pid: u32, data_callback: D, error_callback: E) -> Result<AudioStream, AudioError>
     where
         D: FnMut(&[u8]) + Send + 'static,
-        E: FnMut(RecordingError) + Send + 'static,
+        E: FnMut(AudioError) + Send + 'static,
     {
         com_initialized();
         let activate_params = SafeActivationParams::new(pid);
@@ -93,30 +118,45 @@ impl AudioCapture {
         let res = self.activate_audio_interface(activate_params.prop())?;
         let audio_client = self.activate_loopback_client(&res)?;
 
-        CaptureStream::start_stream(data_callback, error_callback, audio_client, self.format)
+        AudioStream::start_capture_stream(data_callback, error_callback, audio_client, self.format)
     }
 
     /// Start recording audio from an input device
-    pub fn start_recording_device<D, E>(
-        mut self,
-        dev: &Device,
-        data_callback: D,
-        error_callback: E,
-    ) -> Result<CaptureStream, RecordingError>
+    pub fn start_recording_device<D, E>(mut self, dev: &Device, data_callback: D, error_callback: E) -> Result<AudioStream, AudioError>
     where
         D: FnMut(&[u8]) + Send + 'static,
-        E: FnMut(RecordingError) + Send + 'static,
+        E: FnMut(AudioError) + Send + 'static,
     {
         if dev.is_playback {
-            return Err(RecordingError::NotInputDevice);
+            return Err(AudioError::NotInputDevice);
         }
         com_initialized();
 
         let audio_client = self.activate_input_client(dev)?;
-        CaptureStream::start_stream(data_callback, error_callback, audio_client, self.format)
+        AudioStream::start_capture_stream(data_callback, error_callback, audio_client, self.format)
     }
 
-    fn activate_loopback_client(&mut self, res: &IActivateAudioInterfaceAsyncOperation) -> Result<IAudioClient, RecordingError> {
+    pub fn start_playback_device<D, E>(
+        mut self,
+        dev: &Device,
+        data_callback: D,
+        error_callback: E,
+    ) -> Result<(AudioStream, SampleFormat), AudioError>
+    where
+        D: FnMut(&mut [u8]) -> bool + Send + 'static,
+        E: FnMut(AudioError) + Send + 'static,
+    {
+        if !dev.is_playback {
+            return Err(AudioError::NotPlaybackDevice);
+        }
+        com_initialized();
+
+        let (format, audio_client) = self.activate_playback_client(dev)?;
+        AudioStream::start_playback_stream(data_callback, error_callback, audio_client, self.format)
+            .map(|stream| (stream, SampleFormat::from_wave_format_ex(format.0)))
+    }
+
+    fn activate_loopback_client(&mut self, res: &IActivateAudioInterfaceAsyncOperation) -> Result<IAudioClient, AudioError> {
         let mut activate_result = HRESULT::default();
         let mut activated_interface: Option<::windows::core::IUnknown> = Option::default();
         unsafe {
@@ -125,43 +165,61 @@ impl AudioCapture {
                 &mut activated_interface as *mut Option<IUnknown>,
             )
         }
-        .map_err(RecordingError::FailedToStartAudioClient)?;
+        .map_err(AudioError::FailedToStartAudioClient)?;
 
         let audio_client = activated_interface
-            .ok_or(RecordingError::FailedGettingActivationResult)?
+            .ok_or(AudioError::FailedGettingActivationResult)?
             .cast::<IAudioClient>()
-            .map_err(RecordingError::FailedToStartAudioClient)?;
+            .map_err(AudioError::FailedToStartAudioClient)?;
         let capture_format = self.format.clone().into();
         self.initalize_client(
             audio_client,
-            capture_format,
+            &capture_format,
             AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+            20,
         )
     }
 
-    fn activate_input_client(&mut self, dev: &Device) -> Result<IAudioClient, RecordingError> {
+    fn activate_playback_client(&mut self, dev: &Device) -> Result<(WaveFormatWrapper, IAudioClient), AudioError> {
         let audio_client =
-            unsafe { dev.inner.Activate::<IAudioClient>(Com::CLSCTX_ALL, None) }.map_err(RecordingError::FailedToStartAudioClient)?;
+            unsafe { dev.inner.Activate::<IAudioClient>(Com::CLSCTX_ALL, None) }.map_err(AudioError::FailedToStartAudioClient)?;
+        let format = unsafe { audio_client.GetMixFormat() }.map_err(AudioError::FailedToStartAudioClient)?;
+        let format = WaveFormatWrapper::from_ptr(format);
+        self.initalize_client(audio_client, *format, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0)
+            .map(|client| (format, client))
+    }
+
+    fn activate_input_client(&mut self, dev: &Device) -> Result<IAudioClient, AudioError> {
+        let audio_client =
+            unsafe { dev.inner.Activate::<IAudioClient>(Com::CLSCTX_ALL, None) }.map_err(AudioError::FailedToStartAudioClient)?;
         let capture_format: WAVEFORMATEX = self.format.clone().into();
-        self.initalize_client(audio_client, capture_format, AUDCLNT_STREAMFLAGS_EVENTCALLBACK)
+        self.initalize_client(audio_client, &capture_format, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 20)
     }
 
     fn initalize_client(
         &mut self,
         audio_client: IAudioClient,
-        capture_format: WAVEFORMATEX,
+        format: *const WAVEFORMATEX,
         flags: u32,
-    ) -> Result<IAudioClient, RecordingError> {
-        unsafe { audio_client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 200000, 0, &capture_format, None) }
-            .map_err(RecordingError::FailedToStartAudioClient)?;
+        buffer_duration_ms: u32,
+    ) -> Result<IAudioClient, AudioError> {
+        const REFTIME_MS: i64 = 10_000;
+        unsafe {
+            audio_client.Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                flags,
+                REFTIME_MS * buffer_duration_ms as i64,
+                0,
+                format,
+                None,
+            )
+        }
+        .map_err(AudioError::FailedToStartAudioClient)?;
 
         Ok(audio_client)
     }
 
-    fn activate_audio_interface(
-        &self,
-        activate_params: *const PROPVARIANT,
-    ) -> Result<IActivateAudioInterfaceAsyncOperation, RecordingError> {
+    fn activate_audio_interface(&self, activate_params: *const PROPVARIANT) -> Result<IActivateAudioInterfaceAsyncOperation, AudioError> {
         let activate_event = unsafe { CreateEventW(None, false, false, None) }.expect("Failed to create event handle");
         let activate_event = Arc::new(EventHandleWrapper(activate_event));
         let handler: IActivateAudioInterfaceCompletionHandler = ActivateHandler::new(activate_event.clone()).into();
@@ -180,11 +238,11 @@ impl AudioCapture {
     }
 }
 
-pub(crate) fn get_wait_error(wait_event: WAIT_EVENT) -> Result<u32, RecordingError> {
+pub(crate) fn get_wait_error(wait_event: WAIT_EVENT) -> Result<u32, AudioError> {
     if wait_event == WAIT_FAILED {
         let err = unsafe { Foundation::GetLastError() };
         error!("Wait failed: {:?}", err);
-        return Err(RecordingError::WaitFailed(err));
+        return Err(AudioError::WaitFailed(err));
     }
     Ok(wait_event.0)
 }
@@ -206,5 +264,19 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for ActivateHandler_Impl {
     fn ActivateCompleted(&self, _: windows_core::Ref<'_, IActivateAudioInterfaceAsyncOperation>) -> windows::core::Result<()> {
         unsafe { SetEvent(self.activate_event.0)? }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::manager::DeviceManager;
+
+    use super::*;
+
+    #[test]
+    fn playback() {
+        let client = AudioClient::new();
+        let dev = DeviceManager::get_default_playback_device().unwrap();
+        let (audio_stream, format) = client.start_playback_device(&dev, |data| false, |err| {}).unwrap();
     }
 }

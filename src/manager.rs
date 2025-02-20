@@ -5,9 +5,9 @@ use windows::Win32::{
     Devices::Properties,
     Foundation::{self, S_FALSE, S_OK},
     Media::Audio::{
-        eCapture, eRender, AudioSessionStateActive, AudioSessionStateExpired, AudioSessionStateInactive, EDataFlow, IAudioSessionControl,
-        IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator,
-        MMDeviceEnumerator, AUDCLNT_E_UNSUPPORTED_FORMAT, AUDCLNT_SHAREMODE_SHARED, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
+        eCapture, eConsole, eRender, AudioSessionStateActive, AudioSessionStateExpired, AudioSessionStateInactive, EDataFlow,
+        IAudioSessionControl, IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceCollection,
+        IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_E_UNSUPPORTED_FORMAT, AUDCLNT_SHAREMODE_SHARED, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
     },
     System::{
         Com::{self, CoCreateInstance, CLSCTX_ALL, STGM_READ},
@@ -342,6 +342,14 @@ impl SessionManager {
 pub struct DeviceManager {}
 
 impl DeviceManager {
+    pub fn get_default_playback_device() -> Result<Device, AudioError> {
+        com_initialized();
+        let enumerator: IMMDeviceEnumerator =
+            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(AudioError::InstanceCreationError)?;
+        let dev = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }.map_err(AudioError::DeviceError)?;
+        Ok(Device::from(dev, true))
+    }
+
     pub fn get_playback_devices() -> Result<Vec<Device>, AudioError> {
         com_initialized();
         let dev_collection = Devices::new(eRender)?;
