@@ -201,7 +201,7 @@ impl AudioStream {
         unsafe { audio_client.Start() }.map_err(|h| AudioError::FailedToStartAudioClient(h))?;
 
         loop {
-            let wait_res = unsafe { get_wait_error(WaitForMultipleObjectsEx(&handles, false, 0, false))? };
+            let wait_res = unsafe { get_wait_error(WaitForMultipleObjectsEx(&handles, false, INFINITE, false))? };
             // Stop event was called
             if wait_res == WAIT_OBJECT_0.0 + 1 {
                 break;
