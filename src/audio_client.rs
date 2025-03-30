@@ -1,18 +1,15 @@
-use std::{
-    fmt::Display,
-    ops::Deref,
-    sync::{atomic::AtomicBool, Arc},
-    time::Duration,
-};
+use std::{fmt::Display, ops::Deref, sync::Arc};
 
-use crate::{activation_params::SafeActivationParams, audio_stream::AudioStream, sample_format::SampleFormat};
+use crate::manager::{DeviceEnumError, DeviceManager};
+use crate::{activation_params::SafeActivationParams, audio_stream::AudioStream, manager::Devices, sample_format::SampleFormat};
 use crate::{com::com_initialized, manager::Device};
-use log::{error, trace};
+use log::error;
+use thiserror::Error;
 use windows::{
     core::{IUnknown, Interface, GUID, HRESULT},
     Win32::{
         Foundation::{self, CloseHandle, HANDLE, WAIT_EVENT, WAIT_FAILED, WIN32_ERROR},
-        Media::{Audio::*, Multimedia::WAVE_FORMAT_IEEE_FLOAT},
+        Media::Audio::*,
         System::{
             Com::{self, CoTaskMemFree, StructuredStorage::PROPVARIANT},
             Threading::{CreateEventW, SetEvent, WaitForSingleObject, INFINITE},
@@ -21,8 +18,8 @@ use windows::{
 };
 use windows_core::implement;
 
-#[derive(Debug, Clone)]
-pub enum AudioError {
+#[derive(Error, Debug, Clone)]
+pub enum AudioClientError {
     FailedToCreateStopEvent(windows_core::Error),
     FailedToSetupEventHandle(windows_core::Error),
     FailedToStartAudioClient(windows_core::Error),
@@ -36,9 +33,11 @@ pub enum AudioError {
     RecordingAlreadyStarted,
     FailedGettingActivationResult,
     EventCreationError(windows_core::Error),
+    DeviceEnumError(DeviceEnumError),
+    FailedToGetMixFormat(windows_core::Error),
 }
 
-impl Display for AudioError {
+impl Display for AudioClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Recording error: {:?}", self)
     }
@@ -86,6 +85,8 @@ impl Drop for WaveFormatWrapper {
     }
 }
 
+const BUFFER_DURATION_MS: u32 = 20;
+
 pub struct AudioClient {
     format: SampleFormat,
 }
@@ -97,7 +98,7 @@ impl AudioClient {
         }
     }
 
-    pub fn set_format(&mut self, format: SampleFormat) -> Result<(), AudioError> {
+    pub fn set_format(&mut self, format: SampleFormat) -> Result<(), AudioClientError> {
         self.format = format;
         Ok(())
     }
@@ -107,33 +108,86 @@ impl AudioClient {
     }
 
     /// Start recording audio from a process
-    pub fn start_recording_process<D, E>(mut self, pid: u32, data_callback: D, error_callback: E) -> Result<AudioStream, AudioError>
+    pub fn start_recording_process<D, E>(mut self, pid: u32, data_callback: D, error_callback: E) -> Result<AudioStream, AudioClientError>
     where
         D: FnMut(&[u8]) + Send + 'static,
-        E: FnMut(AudioError) + Send + 'static,
+        E: FnMut(AudioClientError) + Send + 'static,
     {
         com_initialized();
-        let activate_params = SafeActivationParams::new(pid);
+        let activate_params = SafeActivationParams::new(Some(pid));
 
         let res = self.activate_audio_interface(activate_params.prop())?;
-        let audio_client = self.activate_loopback_client(&res)?;
+        let audio_client = self.activate_process_capture_client(&res)?;
 
-        AudioStream::start_capture_stream(data_callback, error_callback, audio_client, self.format)
+        AudioStream::start_capture_stream(data_callback, error_callback, audio_client, Some(self.format.clone()))
+    }
+
+    /// Start recording audio from the default loopback device
+    pub fn start_recording_default_loopback<D, E>(self, data_callback: D, error_callback: E) -> Result<AudioStream, AudioClientError>
+    where
+        D: FnMut(&[u8]) + Send + 'static,
+        E: FnMut(AudioClientError) + Send + 'static,
+    {
+        com_initialized();
+        let dev = DeviceManager::get_default_playback_device().map_err(AudioClientError::DeviceEnumError)?;
+
+        self.start_recording_loopback_device(&dev, data_callback, error_callback)
     }
 
     /// Start recording audio from an input device
-    pub fn start_recording_device<D, E>(mut self, dev: &Device, data_callback: D, error_callback: E) -> Result<AudioStream, AudioError>
+    pub fn start_recording_device<D, E>(
+        mut self,
+        dev: &Device,
+        data_callback: D,
+        error_callback: E,
+    ) -> Result<AudioStream, AudioClientError>
     where
         D: FnMut(&[u8]) + Send + 'static,
-        E: FnMut(AudioError) + Send + 'static,
+        E: FnMut(AudioClientError) + Send + 'static,
     {
         if dev.is_playback {
-            return Err(AudioError::NotInputDevice);
+            return Err(AudioClientError::NotInputDevice);
         }
         com_initialized();
 
-        let audio_client = self.activate_input_client(dev)?;
-        AudioStream::start_capture_stream(data_callback, error_callback, audio_client, self.format)
+        let audio_client =
+            unsafe { dev.inner.Activate::<IAudioClient>(Com::CLSCTX_ALL, None) }.map_err(AudioClientError::FailedToStartAudioClient)?;
+        let audio_client = self.initalize_client(
+            audio_client,
+            &self.format.clone().into(),
+            AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+            BUFFER_DURATION_MS,
+        )?;
+
+        AudioStream::start_capture_stream(data_callback, error_callback, audio_client, Some(self.format.clone()))
+    }
+
+    pub fn start_recording_loopback_device<D, E>(
+        mut self,
+        dev: &Device,
+        data_callback: D,
+        error_callback: E,
+    ) -> Result<AudioStream, AudioClientError>
+    where
+        D: FnMut(&[u8]) + Send + 'static,
+        E: FnMut(AudioClientError) + Send + 'static,
+    {
+        if !dev.is_playback {
+            return Err(AudioClientError::NotPlaybackDevice);
+        }
+        com_initialized();
+
+        let audio_client =
+            unsafe { dev.inner.Activate::<IAudioClient>(Com::CLSCTX_ALL, None) }.map_err(AudioClientError::FailedToStartAudioClient)?;
+        let capture_format = unsafe { audio_client.GetMixFormat() }.map_err(AudioClientError::FailedToGetMixFormat)?;
+        let audio_client = self.initalize_client(
+            audio_client,
+            capture_format,
+            AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_LOOPBACK,
+            BUFFER_DURATION_MS,
+        )?;
+
+        AudioStream::start_capture_stream(data_callback, error_callback, audio_client, None)
     }
 
     pub fn start_playback_device<D, E>(
@@ -141,13 +195,13 @@ impl AudioClient {
         dev: &Device,
         data_callback: D,
         error_callback: E,
-    ) -> Result<(AudioStream, SampleFormat), AudioError>
+    ) -> Result<(AudioStream, SampleFormat), AudioClientError>
     where
         D: FnMut(&mut [u8]) -> bool + Send + 'static,
-        E: FnMut(AudioError) + Send + 'static,
+        E: FnMut(AudioClientError) + Send + 'static,
     {
         if !dev.is_playback {
-            return Err(AudioError::NotPlaybackDevice);
+            return Err(AudioClientError::NotPlaybackDevice);
         }
         com_initialized();
 
@@ -156,7 +210,7 @@ impl AudioClient {
             .map(|stream| (stream, SampleFormat::from_wave_format_ex(format.0)))
     }
 
-    fn activate_loopback_client(&mut self, res: &IActivateAudioInterfaceAsyncOperation) -> Result<IAudioClient, AudioError> {
+    fn activate_process_capture_client(&mut self, res: &IActivateAudioInterfaceAsyncOperation) -> Result<IAudioClient, AudioClientError> {
         let mut activate_result = HRESULT::default();
         let mut activated_interface: Option<::windows::core::IUnknown> = Option::default();
         unsafe {
@@ -165,35 +219,28 @@ impl AudioClient {
                 &mut activated_interface as *mut Option<IUnknown>,
             )
         }
-        .map_err(AudioError::FailedToStartAudioClient)?;
+        .map_err(AudioClientError::FailedToStartAudioClient)?;
 
         let audio_client = activated_interface
-            .ok_or(AudioError::FailedGettingActivationResult)?
+            .ok_or(AudioClientError::FailedGettingActivationResult)?
             .cast::<IAudioClient>()
-            .map_err(AudioError::FailedToStartAudioClient)?;
+            .map_err(AudioClientError::FailedToStartAudioClient)?;
         let capture_format = self.format.clone().into();
         self.initalize_client(
             audio_client,
             &capture_format,
             AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-            20,
+            BUFFER_DURATION_MS,
         )
     }
 
-    fn activate_playback_client(&mut self, dev: &Device) -> Result<(WaveFormatWrapper, IAudioClient), AudioError> {
+    fn activate_playback_client(&mut self, dev: &Device) -> Result<(WaveFormatWrapper, IAudioClient), AudioClientError> {
         let audio_client =
-            unsafe { dev.inner.Activate::<IAudioClient>(Com::CLSCTX_ALL, None) }.map_err(AudioError::FailedToStartAudioClient)?;
-        let format = unsafe { audio_client.GetMixFormat() }.map_err(AudioError::FailedToStartAudioClient)?;
+            unsafe { dev.inner.Activate::<IAudioClient>(Com::CLSCTX_ALL, None) }.map_err(AudioClientError::FailedToStartAudioClient)?;
+        let format = unsafe { audio_client.GetMixFormat() }.map_err(AudioClientError::FailedToGetMixFormat)?;
         let format = WaveFormatWrapper::from_ptr(format);
         self.initalize_client(audio_client, *format, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0)
             .map(|client| (format, client))
-    }
-
-    fn activate_input_client(&mut self, dev: &Device) -> Result<IAudioClient, AudioError> {
-        let audio_client =
-            unsafe { dev.inner.Activate::<IAudioClient>(Com::CLSCTX_ALL, None) }.map_err(AudioError::FailedToStartAudioClient)?;
-        let capture_format: WAVEFORMATEX = self.format.clone().into();
-        self.initalize_client(audio_client, &capture_format, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 20)
     }
 
     fn initalize_client(
@@ -202,7 +249,7 @@ impl AudioClient {
         format: *const WAVEFORMATEX,
         flags: u32,
         buffer_duration_ms: u32,
-    ) -> Result<IAudioClient, AudioError> {
+    ) -> Result<IAudioClient, AudioClientError> {
         const REFTIME_MS: i64 = 10_000;
         unsafe {
             audio_client.Initialize(
@@ -214,12 +261,15 @@ impl AudioClient {
                 None,
             )
         }
-        .map_err(AudioError::FailedToStartAudioClient)?;
+        .map_err(AudioClientError::FailedToStartAudioClient)?;
 
         Ok(audio_client)
     }
 
-    fn activate_audio_interface(&self, activate_params: *const PROPVARIANT) -> Result<IActivateAudioInterfaceAsyncOperation, AudioError> {
+    fn activate_audio_interface(
+        &self,
+        activate_params: *const PROPVARIANT,
+    ) -> Result<IActivateAudioInterfaceAsyncOperation, AudioClientError> {
         let activate_event = unsafe { CreateEventW(None, false, false, None) }.expect("Failed to create event handle");
         let activate_event = Arc::new(EventHandleWrapper(activate_event));
         let handler: IActivateAudioInterfaceCompletionHandler = ActivateHandler::new(activate_event.clone()).into();
@@ -238,11 +288,11 @@ impl AudioClient {
     }
 }
 
-pub(crate) fn get_wait_error(wait_event: WAIT_EVENT) -> Result<u32, AudioError> {
+pub(crate) fn get_wait_error(wait_event: WAIT_EVENT) -> Result<u32, AudioClientError> {
     if wait_event == WAIT_FAILED {
         let err = unsafe { Foundation::GetLastError() };
         error!("Wait failed: {:?}", err);
-        return Err(AudioError::WaitFailed(err));
+        return Err(AudioClientError::WaitFailed(err));
     }
     Ok(wait_event.0)
 }

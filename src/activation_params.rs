@@ -2,7 +2,8 @@ use std::mem::ManuallyDrop;
 
 use windows::Win32::{
     Media::Audio::{
-        AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+        AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_TYPE_DEFAULT, AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+        PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
     },
     System::{
         Com::{
@@ -17,13 +18,18 @@ use windows::Win32::{
 pub(crate) struct SafeActivationParams(PROPVARIANT);
 
 impl SafeActivationParams {
-    pub fn new(pid: u32) -> Self {
+    pub fn new(pid: Option<u32>) -> Self {
         let params_ptr = unsafe { CoTaskMemAlloc(size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>()) } as *mut AUDIOCLIENT_ACTIVATION_PARAMS;
         debug_assert!(!params_ptr.is_null(), "Failed allocating memory for activation params");
         let audioclient_activate_params: &mut AUDIOCLIENT_ACTIVATION_PARAMS = unsafe { &mut *params_ptr };
-        audioclient_activate_params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
-        audioclient_activate_params.Anonymous.ProcessLoopbackParams.ProcessLoopbackMode = PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
-        audioclient_activate_params.Anonymous.ProcessLoopbackParams.TargetProcessId = pid;
+        if let Some(pid) = pid {
+            audioclient_activate_params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+            audioclient_activate_params.Anonymous.ProcessLoopbackParams.ProcessLoopbackMode =
+                PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
+            audioclient_activate_params.Anonymous.ProcessLoopbackParams.TargetProcessId = pid;
+        } else {
+            audioclient_activate_params.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_DEFAULT;
+        }
 
         let inner_prop = ManuallyDrop::new(PROPVARIANT_0_0 {
             vt: VT_BLOB,

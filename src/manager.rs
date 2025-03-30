@@ -20,12 +20,8 @@ use crate::{com::com_initialized, event_args::DeviceState, sample_format::Sample
 
 #[derive(Error, Debug)]
 pub enum AudioError {
-    #[error("Failed creating instance: {0}")]
-    InstanceCreationError(windows::core::Error),
-    #[error("Failed getting device collection: {0}")]
-    DeviceCollectionError(windows::core::Error),
-    #[error("Failed getting device count: {0}")]
-    DeviceCountError(windows::core::Error),
+    #[error("Device enumeration error: {0}")]
+    DeviceEnumError(DeviceEnumError),
     #[error("Failed getting device: {0}")]
     DeviceError(windows::core::Error),
     #[error("Failed activating device: {0}")]
@@ -299,7 +295,7 @@ impl SessionManager {
     /// Queries all active audio sessions
     pub fn get_sessions() -> Result<Vec<Session>, AudioError> {
         com_initialized();
-        let dev_collection = Devices::new(eRender)?;
+        let dev_collection = Devices::new(eRender).map_err(AudioError::DeviceEnumError)?;
 
         let mut processes = Vec::new();
         for dev in dev_collection {
@@ -315,7 +311,7 @@ impl SessionManager {
     }
 
     pub fn session_from_id(searched_id: &SafeSessionId) -> Result<Session, AudioError> {
-        let dev_collection = Devices::new(eRender)?;
+        let dev_collection = Devices::new(eRender).map_err(AudioError::DeviceEnumError)?;
         let searched_id = unsafe { searched_id.0.to_string() }.map_err(AudioError::RawStringParseError)?;
         // This is a bit inefficient, but it's the only way, I found, to get the session reliably IAudioSessionManager::GetAudioSessionControl wasn't reliable
         // It's still plenty fast, so it's not a big deal (on the order of tenths of microseconds)
@@ -339,24 +335,36 @@ impl SessionManager {
     }
 }
 
+#[derive(Error, Debug, Clone)]
+pub enum DeviceEnumError {
+    #[error("Failed creating enumerator instance: {0}")]
+    InstanceCreation(windows::core::Error),
+    #[error("Failed enumerating endpoints: {0}")]
+    EndpointEnumeration(windows::core::Error),
+    #[error("Failed getting device count: {0}")]
+    DeviceCountError(windows::core::Error),
+    #[error("Failed getting default device: {0}")]
+    DefaultDeviceError(windows::core::Error),
+}
+
 pub struct DeviceManager {}
 
 impl DeviceManager {
-    pub fn get_default_playback_device() -> Result<Device, AudioError> {
+    pub fn get_default_playback_device() -> Result<Device, DeviceEnumError> {
         com_initialized();
         let enumerator: IMMDeviceEnumerator =
-            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(AudioError::InstanceCreationError)?;
-        let dev = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }.map_err(AudioError::DeviceError)?;
+            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(DeviceEnumError::InstanceCreation)?;
+        let dev = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }.map_err(DeviceEnumError::DefaultDeviceError)?;
         Ok(Device::from(dev, true))
     }
 
-    pub fn get_playback_devices() -> Result<Vec<Device>, AudioError> {
+    pub fn get_playback_devices() -> Result<Vec<Device>, DeviceEnumError> {
         com_initialized();
         let dev_collection = Devices::new(eRender)?;
         Ok(dev_collection.map(|d| Device::from(d, true)).collect())
     }
 
-    pub fn get_capture_devices() -> Result<Vec<Device>, AudioError> {
+    pub fn get_capture_devices() -> Result<Vec<Device>, DeviceEnumError> {
         com_initialized();
         let dev_collection = Devices::new(eCapture)?;
         Ok(dev_collection.map(|d| Device::from(d, false)).collect())
@@ -371,12 +379,12 @@ pub(crate) struct Devices {
 }
 
 impl Devices {
-    pub(crate) fn new(dataflow: EDataFlow) -> Result<Self, AudioError> {
+    pub(crate) fn new(dataflow: EDataFlow) -> Result<Self, DeviceEnumError> {
         let enumerator: IMMDeviceEnumerator =
-            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(AudioError::InstanceCreationError)?;
+            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(DeviceEnumError::InstanceCreation)?;
         let dev_collection =
-            unsafe { enumerator.EnumAudioEndpoints(dataflow, DEVICE_STATE_ACTIVE) }.map_err(AudioError::DeviceCollectionError)?;
-        let dev_count = unsafe { dev_collection.GetCount() }.map_err(AudioError::DeviceCountError)?;
+            unsafe { enumerator.EnumAudioEndpoints(dataflow, DEVICE_STATE_ACTIVE) }.map_err(DeviceEnumError::EndpointEnumeration)?;
+        let dev_count = unsafe { dev_collection.GetCount() }.map_err(DeviceEnumError::DeviceCountError)?;
         Ok(Self {
             dev_collection,
             dev_count,
