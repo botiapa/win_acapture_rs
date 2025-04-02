@@ -358,6 +358,14 @@ impl DeviceManager {
         Ok(Device::from(dev, true))
     }
 
+    pub fn get_default_input_device() -> Result<Device, DeviceEnumError> {
+        com_initialized();
+        let enumerator: IMMDeviceEnumerator =
+            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(DeviceEnumError::InstanceCreation)?;
+        let dev = unsafe { enumerator.GetDefaultAudioEndpoint(eCapture, eConsole) }.map_err(DeviceEnumError::DefaultDeviceError)?;
+        Ok(Device::from(dev, false))
+    }
+
     pub fn get_playback_devices() -> Result<Vec<Device>, DeviceEnumError> {
         com_initialized();
         let dev_collection = Devices::new(eRender)?;

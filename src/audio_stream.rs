@@ -1,8 +1,7 @@
 use std::thread;
 
-use log::error;
 use windows::Win32::{
-    Foundation::{self, HANDLE, WAIT_FAILED, WAIT_OBJECT_0},
+    Foundation::{HANDLE, WAIT_OBJECT_0},
     Media::Audio::{IAudioCaptureClient, IAudioClient, IAudioRenderClient, AUDCLNT_BUFFERFLAGS_SILENT},
     System::Threading::{
         CreateEventA, CreateEventW, GetCurrentThread, SetEvent, SetThreadPriority, WaitForMultipleObjectsEx, INFINITE,

@@ -1,7 +1,7 @@
 use std::{fmt::Display, ops::Deref, sync::Arc};
 
 use crate::manager::{DeviceEnumError, DeviceManager};
-use crate::{activation_params::SafeActivationParams, audio_stream::AudioStream, manager::Devices, sample_format::SampleFormat};
+use crate::{activation_params::SafeActivationParams, audio_stream::AudioStream, sample_format::SampleFormat};
 use crate::{com::com_initialized, manager::Device};
 use log::error;
 use thiserror::Error;
@@ -88,22 +88,20 @@ impl Drop for WaveFormatWrapper {
 const BUFFER_DURATION_MS: u32 = 20;
 
 pub struct AudioClient {
-    format: SampleFormat,
+    format: Option<SampleFormat>,
 }
 
 impl AudioClient {
     pub fn new() -> Self {
-        Self {
-            format: SampleFormat::default(),
-        }
+        Self { format: None }
     }
 
     pub fn set_format(&mut self, format: SampleFormat) -> Result<(), AudioClientError> {
-        self.format = format;
+        self.format = Some(format);
         Ok(())
     }
 
-    pub fn get_format(&self) -> SampleFormat {
+    pub fn get_format(&self) -> Option<SampleFormat> {
         self.format.clone()
     }
 
@@ -119,7 +117,7 @@ impl AudioClient {
         let res = self.activate_audio_interface(activate_params.prop())?;
         let audio_client = self.activate_process_capture_client(&res)?;
 
-        AudioStream::start_capture_stream(data_callback, error_callback, audio_client, Some(self.format.clone()))
+        AudioStream::start_capture_stream(data_callback, error_callback, audio_client, self.format.clone())
     }
 
     /// Start recording audio from the default loopback device
@@ -132,6 +130,17 @@ impl AudioClient {
         let dev = DeviceManager::get_default_playback_device().map_err(AudioClientError::DeviceEnumError)?;
 
         self.start_recording_loopback_device(&dev, data_callback, error_callback)
+    }
+
+    pub fn start_recording_default_input<D, E>(self, data_callback: D, error_callback: E) -> Result<AudioStream, AudioClientError>
+    where
+        D: FnMut(&[u8]) + Send + 'static,
+        E: FnMut(AudioClientError) + Send + 'static,
+    {
+        com_initialized();
+        let dev = DeviceManager::get_default_input_device().map_err(AudioClientError::DeviceEnumError)?;
+
+        self.start_recording_device(&dev, data_callback, error_callback)
     }
 
     /// Start recording audio from an input device
@@ -152,14 +161,14 @@ impl AudioClient {
 
         let audio_client =
             unsafe { dev.inner.Activate::<IAudioClient>(Com::CLSCTX_ALL, None) }.map_err(AudioClientError::FailedToStartAudioClient)?;
-        let audio_client = self.initalize_client(
-            audio_client,
-            &self.format.clone().into(),
-            AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-            BUFFER_DURATION_MS,
-        )?;
+        let format = match self.format.clone() {
+            Some(format) => &mut format.into() as *mut WAVEFORMATEX,
+            None => unsafe { audio_client.GetMixFormat() }.map_err(AudioClientError::FailedToGetMixFormat)?,
+        };
 
-        AudioStream::start_capture_stream(data_callback, error_callback, audio_client, Some(self.format.clone()))
+        let audio_client = self.initalize_client(audio_client, format, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, BUFFER_DURATION_MS)?;
+
+        AudioStream::start_capture_stream(data_callback, error_callback, audio_client, self.format.clone())
     }
 
     pub fn start_recording_loopback_device<D, E>(
@@ -206,7 +215,7 @@ impl AudioClient {
         com_initialized();
 
         let (format, audio_client) = self.activate_playback_client(dev)?;
-        AudioStream::start_playback_stream(data_callback, error_callback, audio_client, self.format)
+        AudioStream::start_playback_stream(data_callback, error_callback, audio_client, self.format.unwrap_or_default())
             .map(|stream| (stream, SampleFormat::from_wave_format_ex(format.0)))
     }
 
@@ -225,7 +234,7 @@ impl AudioClient {
             .ok_or(AudioClientError::FailedGettingActivationResult)?
             .cast::<IAudioClient>()
             .map_err(AudioClientError::FailedToStartAudioClient)?;
-        let capture_format = self.format.clone().into();
+        let capture_format = self.format.clone().unwrap_or_default().into();
         self.initalize_client(
             audio_client,
             &capture_format,
