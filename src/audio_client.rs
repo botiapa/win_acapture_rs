@@ -1,7 +1,7 @@
 use std::{fmt::Display, ops::Deref, sync::Arc};
 
 use crate::manager::{DeviceEnumError, DeviceManager};
-use crate::{activation_params::SafeActivationParams, audio_stream::AudioStream, sample_format::SampleFormat};
+use crate::{activation_params::SafeActivationParams, audio_stream::AudioStreamConfig, sample_format::SampleFormat};
 use crate::{com::com_initialized, manager::Device};
 use log::error;
 use thiserror::Error;
@@ -35,6 +35,7 @@ pub enum AudioClientError {
     EventCreationError(windows_core::Error),
     DeviceEnumError(DeviceEnumError),
     FailedToGetMixFormat(windows_core::Error),
+    StreamAlreadyStarted,
 }
 
 impl Display for AudioClientError {
@@ -106,7 +107,7 @@ impl AudioClient {
     }
 
     /// Start recording audio from a process
-    pub fn start_recording_process<D, E>(mut self, pid: u32, data_callback: D, error_callback: E) -> Result<AudioStream, AudioClientError>
+    pub fn start_recording_process<D, E>(mut self, pid: u32, data_callback: D, error_callback: E) -> Result<AudioStreamConfig, AudioClientError>
     where
         D: FnMut(&[u8]) + Send + 'static,
         E: FnMut(AudioClientError) + Send + 'static,
@@ -117,11 +118,11 @@ impl AudioClient {
         let res = self.activate_audio_interface(activate_params.prop())?;
         let audio_client = self.activate_process_capture_client(&res)?;
 
-        AudioStream::start_capture_stream(data_callback, error_callback, audio_client, self.format.clone())
+        AudioStreamConfig::create_capture_stream(data_callback, error_callback, audio_client, self.format.clone())
     }
 
     /// Start recording audio from the default loopback device
-    pub fn start_recording_default_loopback<D, E>(self, data_callback: D, error_callback: E) -> Result<AudioStream, AudioClientError>
+    pub fn start_recording_default_loopback<D, E>(self, data_callback: D, error_callback: E) -> Result<AudioStreamConfig, AudioClientError>
     where
         D: FnMut(&[u8]) + Send + 'static,
         E: FnMut(AudioClientError) + Send + 'static,
@@ -132,7 +133,7 @@ impl AudioClient {
         self.start_recording_loopback_device(&dev, data_callback, error_callback)
     }
 
-    pub fn start_recording_default_input<D, E>(self, data_callback: D, error_callback: E) -> Result<AudioStream, AudioClientError>
+    pub fn start_recording_default_input<D, E>(self, data_callback: D, error_callback: E) -> Result<AudioStreamConfig, AudioClientError>
     where
         D: FnMut(&[u8]) + Send + 'static,
         E: FnMut(AudioClientError) + Send + 'static,
@@ -149,7 +150,7 @@ impl AudioClient {
         dev: &Device,
         data_callback: D,
         error_callback: E,
-    ) -> Result<AudioStream, AudioClientError>
+    ) -> Result<AudioStreamConfig, AudioClientError>
     where
         D: FnMut(&[u8]) + Send + 'static,
         E: FnMut(AudioClientError) + Send + 'static,
@@ -168,7 +169,7 @@ impl AudioClient {
 
         let audio_client = self.initalize_client(audio_client, format, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, BUFFER_DURATION_MS)?;
 
-        AudioStream::start_capture_stream(data_callback, error_callback, audio_client, self.format.clone())
+        AudioStreamConfig::create_capture_stream(data_callback, error_callback, audio_client, self.format.clone())
     }
 
     pub fn start_recording_loopback_device<D, E>(
@@ -176,7 +177,7 @@ impl AudioClient {
         dev: &Device,
         data_callback: D,
         error_callback: E,
-    ) -> Result<AudioStream, AudioClientError>
+    ) -> Result<AudioStreamConfig, AudioClientError>
     where
         D: FnMut(&[u8]) + Send + 'static,
         E: FnMut(AudioClientError) + Send + 'static,
@@ -196,7 +197,7 @@ impl AudioClient {
             BUFFER_DURATION_MS,
         )?;
 
-        AudioStream::start_capture_stream(data_callback, error_callback, audio_client, None)
+        AudioStreamConfig::create_capture_stream(data_callback, error_callback, audio_client, None)
     }
 
     pub fn start_playback_device<D, E>(
@@ -204,7 +205,7 @@ impl AudioClient {
         dev: &Device,
         data_callback: D,
         error_callback: E,
-    ) -> Result<(AudioStream, SampleFormat), AudioClientError>
+    ) -> Result<(AudioStreamConfig, SampleFormat), AudioClientError>
     where
         D: FnMut(&mut [u8]) -> bool + Send + 'static,
         E: FnMut(AudioClientError) + Send + 'static,
@@ -215,7 +216,7 @@ impl AudioClient {
         com_initialized();
 
         let (format, audio_client) = self.activate_playback_client(dev)?;
-        AudioStream::start_playback_stream(data_callback, error_callback, audio_client, self.format.unwrap_or_default())
+        AudioStreamConfig::create_playback_stream(data_callback, error_callback, audio_client, self.format.unwrap_or_default())
             .map(|stream| (stream, SampleFormat::from_wave_format_ex(format.0)))
     }
 

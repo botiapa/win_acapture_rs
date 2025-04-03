@@ -14,64 +14,50 @@ use crate::{
     sample_format::SampleFormat,
 };
 
-pub(crate) struct CaptureRunContext {
+pub(crate) struct StreamRunContext<T> {
     audio_client: IAudioClient,
-    capture_client: IAudioCaptureClient,
+    stream_client: T,
     stop_handle: HANDLE,
-    format: Option<SampleFormat>,
+    format: SampleFormat,
 }
-unsafe impl Send for CaptureRunContext {}
+unsafe impl<T> Send for StreamRunContext<T> {}
 
-impl CaptureRunContext {
+impl<T> StreamRunContext<T> {
     pub(crate) fn new(
         audio_client: IAudioClient,
-        capture_client: IAudioCaptureClient,
+        stream_client: T,
         stop_handle: HANDLE,
-        format: Option<SampleFormat>,
+        format: SampleFormat,
     ) -> Self {
         Self {
             audio_client,
-            capture_client,
+            stream_client,
             stop_handle,
             format,
         }
     }
 }
 
-pub(crate) struct PlaybackRunContext {
-    audio_client: IAudioClient,
-    render_client: IAudioRenderClient,
+pub struct AudioStreamConfig {
+    stream_fn: Box<dyn FnOnce() + Send + 'static>,
     stop_handle: HANDLE,
     format: SampleFormat,
 }
 
-unsafe impl Send for PlaybackRunContext {}
-
-impl PlaybackRunContext {
-    pub(crate) fn new(audio_client: IAudioClient, render_client: IAudioRenderClient, stop_handle: HANDLE, format: SampleFormat) -> Self {
-        Self {
-            audio_client,
-            render_client,
-            stop_handle,
-            format,
-        }
-    }
-}
-
 pub struct AudioStream {
     thread: Option<thread::JoinHandle<()>>,
-    thread_stop_handle: HANDLE,
+    stop_handle: HANDLE,
 }
 
-unsafe impl Send for AudioStream {}
+unsafe impl Send for AudioStreamConfig {}
 
-impl AudioStream {
-    pub(crate) fn start_capture_stream<D, E>(
+impl AudioStreamConfig {
+    pub(crate) fn create_capture_stream<D, E>(
         data_callback: D,
         mut error_callback: E,
         audio_client: IAudioClient,
         format: Option<SampleFormat>,
-    ) -> Result<AudioStream, AudioClientError>
+    ) -> Result<AudioStreamConfig, AudioClientError>
     where
         D: FnMut(&[u8]) + Send + 'static,
         E: FnMut(AudioClientError) + Send + 'static,
@@ -80,32 +66,41 @@ impl AudioStream {
             unsafe { audio_client.GetService::<IAudioCaptureClient>() }.map_err(AudioClientError::FailedToStartAudioClient)?;
         let stop_handle = unsafe { CreateEventW(None, false, false, None) }.map_err(AudioClientError::EventCreationError)?;
 
-        let run_context = CaptureRunContext {
+        let format = match format {
+            Some(format) => format,
+            None => {
+                let mix_format = unsafe { audio_client.GetMixFormat() }.map_err(AudioClientError::FailedToGetMixFormat)?;
+                SampleFormat::from_wave_format_ex(mix_format)
+            }
+        };
+
+        let run_context = StreamRunContext {
             audio_client,
-            capture_client,
+            stream_client: capture_client,
             stop_handle: stop_handle.clone(),
             format: format.clone(),
         };
 
-        let thr = thread::spawn(move || {
+        let capture_fn = move || {
             let res = Self::capture_audio(run_context, data_callback);
             if let Err(err) = res {
                 error_callback(err);
             }
-        });
+        };
 
-        Ok(AudioStream {
-            thread: Some(thr),
-            thread_stop_handle: stop_handle,
+        Ok(AudioStreamConfig {
+            stream_fn: Box::new(capture_fn),
+            stop_handle,
+            format: format.clone(),
         })
     }
 
-    pub(crate) fn start_playback_stream<D, E>(
+    pub(crate) fn create_playback_stream<D, E>(
         data_callback: D,
         mut error_callback: E,
         audio_client: IAudioClient,
         format: SampleFormat,
-    ) -> Result<AudioStream, AudioClientError>
+    ) -> Result<AudioStreamConfig, AudioClientError>
     where
         D: FnMut(&mut [u8]) -> bool + Send + 'static,
         E: FnMut(AudioClientError) + Send + 'static,
@@ -114,44 +109,47 @@ impl AudioStream {
             unsafe { audio_client.GetService::<IAudioRenderClient>() }.map_err(AudioClientError::FailedToStartAudioClient)?;
         let stop_handle = unsafe { CreateEventW(None, false, false, None) }.map_err(AudioClientError::EventCreationError)?;
 
-        let run_context = PlaybackRunContext {
+        let run_context = StreamRunContext {
             audio_client,
-            render_client,
+            stream_client: render_client,
             stop_handle: stop_handle.clone(),
             format: format.clone(),
         };
 
-        let thr = thread::spawn(move || {
+        let capture_fn = move || {
             let res = Self::playback_audio(run_context, data_callback);
             if let Err(err) = res {
                 error_callback(err);
             }
-        });
+        };
 
-        Ok(AudioStream {
-            thread: Some(thr),
-            thread_stop_handle: stop_handle,
+        Ok(AudioStreamConfig {
+            stream_fn: Box::new(capture_fn),
+            stop_handle,
+            format,
         })
     }
 
-    // See drop implementation for cleanup
-    pub fn stop_recording(self) {}
+    pub fn start_capture(self) -> Result<AudioStream, AudioClientError> {
+        let thr = thread::spawn(self.stream_fn);
+        Ok(AudioStream {
+            thread: Some(thr),
+            stop_handle: self.stop_handle,
+        })
+    }
 
-    fn capture_audio<D>(run_context: CaptureRunContext, mut data_callback: D) -> Result<(), AudioClientError>
+    pub fn format(&self) -> &SampleFormat {
+        &self.format
+    }
+
+    fn capture_audio<D>(run_context: StreamRunContext<IAudioCaptureClient>, mut data_callback: D) -> Result<(), AudioClientError>
     where
         D: FnMut(&[u8]),
     {
         Self::set_thread_priority();
-        let (audio_client, capture_client) = (run_context.audio_client, run_context.capture_client);
+        let (audio_client, capture_client) = (run_context.audio_client, run_context.stream_client);
 
-        let block_align = match run_context.format {
-            Some(format) => format.block_align() as usize,
-            None => {
-                let mix_format = unsafe { audio_client.GetMixFormat() }.map_err(AudioClientError::FailedToStartAudioClient)?;
-                let block_align = unsafe { (*mix_format).nBlockAlign } as usize;
-                block_align
-            }
-        };
+        let block_align = run_context.format.block_align() as usize;
 
         let mut buffer: *mut u8 = std::ptr::null_mut();
         let mut flags: u32 = 0;
@@ -199,12 +197,12 @@ impl AudioStream {
         Ok(())
     }
 
-    fn playback_audio<D>(run_context: PlaybackRunContext, mut data_callback: D) -> Result<(), AudioClientError>
+    fn playback_audio<D>(run_context: StreamRunContext<IAudioRenderClient>, mut data_callback: D) -> Result<(), AudioClientError>
     where
         D: FnMut(&mut [u8]) -> bool,
     {
         Self::set_thread_priority();
-        let (audio_client, render_client) = (run_context.audio_client, run_context.render_client);
+        let (audio_client, render_client) = (run_context.audio_client, run_context.stream_client);
 
         let buffer_size = unsafe { audio_client.GetBufferSize() }.map_err(AudioClientError::FailedToStartAudioClient)?;
         let h_event = unsafe { CreateEventA(None, false, false, None) }.map_err(|h| AudioClientError::FailedToCreateStopEvent(h))?;
@@ -245,10 +243,15 @@ impl AudioStream {
     }
 }
 
+impl AudioStream {
+    // See drop implementation for cleanup
+    pub fn stop_recording(self) {}
+}
+
 impl Drop for AudioStream {
     fn drop(&mut self) {
         unsafe {
-            let _ = SetEvent(self.thread_stop_handle);
+            let _ = SetEvent(self.stop_handle);
         }
         let _ = self.thread.take().map(|thr| thr.join());
     }
