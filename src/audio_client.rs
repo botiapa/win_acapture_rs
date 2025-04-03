@@ -107,7 +107,12 @@ impl AudioClient {
     }
 
     /// Start recording audio from a process
-    pub fn start_recording_process<D, E>(mut self, pid: u32, data_callback: D, error_callback: E) -> Result<AudioStreamConfig, AudioClientError>
+    pub fn start_recording_process<D, E>(
+        mut self,
+        pid: u32,
+        data_callback: D,
+        error_callback: E,
+    ) -> Result<AudioStreamConfig, AudioClientError>
     where
         D: FnMut(&[u8]) + Send + 'static,
         E: FnMut(AudioClientError) + Send + 'static,
@@ -198,6 +203,19 @@ impl AudioClient {
         )?;
 
         AudioStreamConfig::create_capture_stream(data_callback, error_callback, audio_client, None)
+    }
+
+    pub fn start_playback_default_device<D, E>(
+        self,
+        data_callback: D,
+        error_callback: E,
+    ) -> Result<(AudioStreamConfig, SampleFormat), AudioClientError>
+    where
+        D: FnMut(&mut [u8]) -> bool + Send + 'static,
+        E: FnMut(AudioClientError) + Send + 'static,
+    {
+        let dev = DeviceManager::get_default_playback_device().map_err(AudioClientError::DeviceEnumError)?;
+        self.start_playback_device(&dev, data_callback, error_callback)
     }
 
     pub fn start_playback_device<D, E>(
@@ -336,7 +354,6 @@ mod tests {
     #[test]
     fn playback() {
         let client = AudioClient::new();
-        let dev = DeviceManager::get_default_playback_device().unwrap();
-        let (audio_stream, format) = client.start_playback_device(&dev, |data| false, |err| {}).unwrap();
+        let (audio_stream, format) = client.start_playback_default_device(|data| false, |err| {}).unwrap();
     }
 }

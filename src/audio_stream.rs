@@ -23,12 +23,7 @@ pub(crate) struct StreamRunContext<T> {
 unsafe impl<T> Send for StreamRunContext<T> {}
 
 impl<T> StreamRunContext<T> {
-    pub(crate) fn new(
-        audio_client: IAudioClient,
-        stream_client: T,
-        stop_handle: HANDLE,
-        format: SampleFormat,
-    ) -> Self {
+    pub(crate) fn new(audio_client: IAudioClient, stream_client: T, stop_handle: HANDLE, format: SampleFormat) -> Self {
         Self {
             audio_client,
             stream_client,
@@ -44,12 +39,14 @@ pub struct AudioStreamConfig {
     format: SampleFormat,
 }
 
+unsafe impl Send for AudioStreamConfig {}
+
 pub struct AudioStream {
     thread: Option<thread::JoinHandle<()>>,
     stop_handle: HANDLE,
 }
 
-unsafe impl Send for AudioStreamConfig {}
+unsafe impl Send for AudioStream {}
 
 impl AudioStreamConfig {
     pub(crate) fn create_capture_stream<D, E>(
