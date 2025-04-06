@@ -1,20 +1,21 @@
-use std::{ops::Deref, string::FromUtf16Error};
+use std::{ops::Deref, path, string::FromUtf16Error};
 
 use thiserror::Error;
 use windows::Win32::{
     Devices::Properties,
-    Foundation::{self, S_FALSE, S_OK},
+    Foundation::{self, GetLastError, S_FALSE, S_OK, WIN32_ERROR},
     Media::Audio::{
         eCapture, eConsole, eRender, AudioSessionStateActive, AudioSessionStateExpired, AudioSessionStateInactive, EDataFlow,
         IAudioSessionControl, IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceCollection,
         IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_E_UNSUPPORTED_FORMAT, AUDCLNT_SHAREMODE_SHARED, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
     },
+    Storage::FileSystem::QueryDosDeviceW,
     System::{
         Com::{self, CoCreateInstance, CLSCTX_ALL, STGM_READ},
         Variant::VT_LPWSTR,
     },
 };
-use windows_core::{Interface, PWSTR};
+use windows_core::{Interface, PCWSTR, PWSTR};
 
 use crate::{com::com_initialized, event_args::DeviceState, sample_format::SampleFormat};
 
@@ -56,6 +57,12 @@ pub enum AudioError {
     FailedGettingMixFormat(windows::core::Error),
     #[error("Failed reading closest format match")]
     FailedReadingClosestFormatMatch,
+    #[error("Failed getting volume path name: {0}")]
+    FailedGettingVolumePathName(windows::core::Error),
+    #[error("Invalid path")]
+    InvalidPath,
+    #[error("Failed getting dos path: {0}")]
+    FailedGettingDosPath(u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -333,6 +340,23 @@ impl SessionManager {
         }
         Err(AudioError::SessionNotFound)
     }
+}
+
+const MAX_PATH_LEN: usize = 1024;
+pub fn get_dos_path(path: &str) -> Result<String, AudioError> {
+    let (drive_letter, path) = path.split_once(":\\").ok_or(AudioError::InvalidPath)?;
+    let drive_letter = format!("{}:\0", drive_letter);
+    let drive_letter_u16 = drive_letter.encode_utf16().collect::<Vec<u16>>();
+    let drive_letter_wc = PCWSTR::from_raw(drive_letter_u16.as_ptr());
+    let mut target_path_u16 = vec![0u16; MAX_PATH_LEN];
+    let res = unsafe { QueryDosDeviceW(drive_letter_wc, Some(&mut target_path_u16)) };
+    if res == 0 {
+        let err = unsafe { GetLastError() };
+        return Err(AudioError::FailedGettingDosPath(err.0));
+    }
+    let target_path_u16 = target_path_u16.into_iter().take_while(|&c| c != 0).collect::<Vec<u16>>(); // Take the first null terminated string
+    let target_path = String::from_utf16(&target_path_u16).map_err(AudioError::RawStringParseError)?;
+    Ok(format!("{}\\{}", target_path, path))
 }
 
 #[derive(Error, Debug, Clone)]
