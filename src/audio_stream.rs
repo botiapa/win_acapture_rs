@@ -1,4 +1,4 @@
-use std::thread;
+use std::{thread, time::Instant};
 
 use windows::Win32::{
     Foundation::{HANDLE, WAIT_OBJECT_0},
@@ -41,6 +41,21 @@ pub struct AudioStreamConfig {
 
 unsafe impl Send for AudioStreamConfig {}
 
+pub struct CapturePacket<'a> {
+    data: &'a [u8],
+    timestamp: Instant,
+}
+
+impl<'a> CapturePacket<'a> {
+    pub fn data(&self) -> &'a [u8] {
+        self.data
+    }
+
+    pub fn timestamp(&self) -> Instant {
+        self.timestamp
+    }
+}
+
 pub struct AudioStream {
     thread: Option<thread::JoinHandle<()>>,
     stop_handle: HANDLE,
@@ -56,7 +71,7 @@ impl AudioStreamConfig {
         format: Option<SampleFormat>,
     ) -> Result<AudioStreamConfig, AudioClientError>
     where
-        D: FnMut(&[u8]) + Send + 'static,
+        D: FnMut(CapturePacket) + Send + 'static,
         E: FnMut(AudioClientError) + Send + 'static,
     {
         let capture_client =
@@ -141,7 +156,7 @@ impl AudioStreamConfig {
 
     fn capture_audio<D>(run_context: StreamRunContext<IAudioCaptureClient>, mut data_callback: D) -> Result<(), AudioClientError>
     where
-        D: FnMut(&[u8]),
+        D: FnMut(CapturePacket),
     {
         Self::set_thread_priority();
         let (audio_client, capture_client) = (run_context.audio_client, run_context.stream_client);
@@ -181,9 +196,13 @@ impl AudioStreamConfig {
             }
             .map_err(AudioClientError::FailedGettingBuffer)?;
             debug_assert!(!buffer.is_null());
+            let now = Instant::now();
 
             let buf_slice = unsafe { std::slice::from_raw_parts(buffer, frames_available as usize * block_align) };
-            data_callback(buf_slice);
+            data_callback(CapturePacket {
+                data: buf_slice,
+                timestamp: now,
+            });
 
             unsafe { capture_client.ReleaseBuffer(frames_available) }.map_err(AudioClientError::FailedReleasingBuffer)?;
         }

@@ -1,5 +1,6 @@
 use std::{fmt::Display, ops::Deref, sync::Arc};
 
+use crate::audio_stream::CapturePacket;
 use crate::manager::{DeviceEnumError, DeviceManager};
 use crate::{activation_params::SafeActivationParams, audio_stream::AudioStreamConfig, sample_format::SampleFormat};
 use crate::{com::com_initialized, manager::Device};
@@ -114,7 +115,7 @@ impl AudioClient {
         error_callback: E,
     ) -> Result<AudioStreamConfig, AudioClientError>
     where
-        D: FnMut(&[u8]) + Send + 'static,
+        D: FnMut(CapturePacket) + Send + 'static,
         E: FnMut(AudioClientError) + Send + 'static,
     {
         com_initialized();
@@ -129,7 +130,7 @@ impl AudioClient {
     /// Start recording audio from the default loopback device
     pub fn start_recording_default_loopback<D, E>(self, data_callback: D, error_callback: E) -> Result<AudioStreamConfig, AudioClientError>
     where
-        D: FnMut(&[u8]) + Send + 'static,
+        D: FnMut(CapturePacket) + Send + 'static,
         E: FnMut(AudioClientError) + Send + 'static,
     {
         com_initialized();
@@ -140,7 +141,7 @@ impl AudioClient {
 
     pub fn start_recording_default_input<D, E>(self, data_callback: D, error_callback: E) -> Result<AudioStreamConfig, AudioClientError>
     where
-        D: FnMut(&[u8]) + Send + 'static,
+        D: FnMut(CapturePacket) + Send + 'static,
         E: FnMut(AudioClientError) + Send + 'static,
     {
         com_initialized();
@@ -157,7 +158,7 @@ impl AudioClient {
         error_callback: E,
     ) -> Result<AudioStreamConfig, AudioClientError>
     where
-        D: FnMut(&[u8]) + Send + 'static,
+        D: FnMut(CapturePacket) + Send + 'static,
         E: FnMut(AudioClientError) + Send + 'static,
     {
         if dev.is_playback {
@@ -184,7 +185,7 @@ impl AudioClient {
         error_callback: E,
     ) -> Result<AudioStreamConfig, AudioClientError>
     where
-        D: FnMut(&[u8]) + Send + 'static,
+        D: FnMut(CapturePacket) + Send + 'static,
         E: FnMut(AudioClientError) + Send + 'static,
     {
         if !dev.is_playback {
