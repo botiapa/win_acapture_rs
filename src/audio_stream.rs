@@ -1,4 +1,7 @@
-use std::{thread, time::Instant};
+use std::{
+    thread::{self},
+    time::Instant,
+};
 
 use windows::Win32::{
     Foundation::{HANDLE, WAIT_OBJECT_0},
@@ -37,6 +40,7 @@ pub struct AudioStreamConfig {
     stream_fn: Box<dyn FnOnce() + Send + 'static>,
     stop_handle: HANDLE,
     format: SampleFormat,
+    thread_name: String,
 }
 
 unsafe impl Send for AudioStreamConfig {}
@@ -104,6 +108,7 @@ impl AudioStreamConfig {
             stream_fn: Box::new(capture_fn),
             stop_handle,
             format: format.clone(),
+            thread_name: "capture".to_string(),
         })
     }
 
@@ -139,11 +144,15 @@ impl AudioStreamConfig {
             stream_fn: Box::new(capture_fn),
             stop_handle,
             format,
+            thread_name: "playback".to_string(),
         })
     }
 
-    pub fn start_capture(self) -> Result<AudioStream, AudioClientError> {
-        let thr = thread::spawn(self.stream_fn);
+    pub fn start(self) -> Result<AudioStream, AudioClientError> {
+        let thr = thread::Builder::new()
+            .name(self.thread_name)
+            .spawn(self.stream_fn)
+            .map_err(|_| AudioClientError::FailedToCreateThread)?;
         Ok(AudioStream {
             thread: Some(thr),
             stop_handle: self.stop_handle,

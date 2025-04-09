@@ -36,6 +36,7 @@ pub enum AudioClientError {
     EventCreationError(windows_core::Error),
     DeviceEnumError(DeviceEnumError),
     FailedToGetMixFormat(windows_core::Error),
+    FailedToCreateThread,
     StreamAlreadyStarted,
 }
 

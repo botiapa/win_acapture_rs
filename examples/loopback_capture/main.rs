@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let stream = audio_capture.start_recording_default_loopback(
         move |data| {
             let mut samples = samples_clone.lock().unwrap();
-            samples.extend_from_slice(data);
+            samples.extend_from_slice(data.data());
         },
         move |error| {
             println!("error: {:?}", error);
