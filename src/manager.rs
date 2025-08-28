@@ -1,9 +1,9 @@
-use std::{ops::Deref, path, string::FromUtf16Error};
+use std::{ffi::OsString, ops::Deref, os::windows::ffi::OsStrExt, string::FromUtf16Error};
 
 use thiserror::Error;
 use windows::Win32::{
     Devices::Properties,
-    Foundation::{self, GetLastError, S_FALSE, S_OK, WIN32_ERROR},
+    Foundation::{self, GetLastError, S_FALSE, S_OK},
     Media::Audio::{
         eCapture, eConsole, eRender, AudioSessionStateActive, AudioSessionStateExpired, AudioSessionStateInactive, EDataFlow,
         IAudioSessionControl, IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceCollection,
@@ -63,6 +63,8 @@ pub enum AudioError {
     InvalidPath,
     #[error("Failed getting dos path: {0}")]
     FailedGettingDosPath(u32),
+    #[error("Failed getting nt path: {0}")]
+    FailedGettingNtPath(u32),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -343,7 +345,8 @@ impl SessionManager {
 }
 
 const MAX_PATH_LEN: usize = 1024;
-pub fn get_dos_path(path: &str) -> Result<String, AudioError> {
+/// Gets the NT path (\\Device\\HarddiskVolumeX\\...)
+pub fn get_nt_path(path: &str) -> Result<String, AudioError> {
     let (drive_letter, path) = path.split_once(":\\").ok_or(AudioError::InvalidPath)?;
     let drive_letter = format!("{}:\0", drive_letter);
     let drive_letter_u16 = drive_letter.encode_utf16().collect::<Vec<u16>>();
@@ -352,11 +355,54 @@ pub fn get_dos_path(path: &str) -> Result<String, AudioError> {
     let res = unsafe { QueryDosDeviceW(drive_letter_wc, Some(&mut target_path_u16)) };
     if res == 0 {
         let err = unsafe { GetLastError() };
-        return Err(AudioError::FailedGettingDosPath(err.0));
+        return Err(AudioError::FailedGettingNtPath(err.0));
     }
     let target_path_u16 = target_path_u16.into_iter().take_while(|&c| c != 0).collect::<Vec<u16>>(); // Take the first null terminated string
     let target_path = String::from_utf16(&target_path_u16).map_err(AudioError::RawStringParseError)?;
     Ok(format!("{}\\{}", target_path, path))
+}
+
+/// Convert the NT path to dos path by mapping drive letters
+/// e.g. \\Device\\HarddiskVolume3\\... -> D:\...
+pub fn get_dos_path(path: &str) -> Result<String, AudioError> {
+    if !path.starts_with("\\Device\\") {
+        return Err(AudioError::InvalidPath);
+    }
+
+    let parts: Vec<&str> = path.split('\\').collect();
+    if parts.len() >= 3 {
+        let device_name = parts[2]; // e.g., "HarddiskVolume3"
+
+        for drive_letter in b'A'..=b'Z' {
+            let dos_device = format!("{}:", drive_letter as char);
+            let mut buffer = [0u16; 512];
+
+            let wide_dos_device: Vec<u16> = OsString::from(dos_device)
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+
+            let length = unsafe { QueryDosDeviceW(windows_core::PCWSTR(wide_dos_device.as_ptr()), Some(&mut buffer)) };
+
+            if length > 0 {
+                let device_path = String::from_utf16(&buffer[..length as usize - 1]).map_err(AudioError::RawStringParseError)?;
+
+                // Check if this device contains our target device name
+                if device_path.contains(device_name) {
+                    // Reconstruct the DOS path
+                    if parts.len() > 2 {
+                        let remaining_path: Vec<&str> = parts[3..].to_vec();
+                        return Ok(format!("{}:\\{}", drive_letter as char, remaining_path.join("\\")));
+                    } else {
+                        return Ok(format!("{}:\\", drive_letter as char));
+                    }
+                }
+            }
+        }
+        return Err(AudioError::FailedGettingDosPath(2)); // ERROR_FILE_NOT_FOUND
+    }
+    return Err(AudioError::InvalidPath);
 }
 
 #[derive(Error, Debug, Clone)]
