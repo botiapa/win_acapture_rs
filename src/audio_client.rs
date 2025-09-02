@@ -65,7 +65,7 @@ impl Deref for EventHandleWrapper {
     }
 }
 
-pub struct PWSTRWrapper(PWSTR);
+pub(crate) struct PWSTRWrapper(pub(crate) PWSTR);
 impl Drop for PWSTRWrapper {
     fn drop(&mut self) {
         unsafe {

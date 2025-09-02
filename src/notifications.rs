@@ -8,12 +8,12 @@ use windows::Win32::Media::Audio::{AudioSessionDisconnectReason, AudioSessionSta
 use windows::Win32::{
     Foundation::{self, PROPERTYKEY},
     Media::Audio::{
-        EDataFlow, ERole, IAudioSessionEvents, IAudioSessionEvents_Impl, IMMDeviceEnumerator, IMMNotificationClient,
-        IMMNotificationClient_Impl, MMDeviceEnumerator, DEVICE_STATE,
+        DEVICE_STATE, EDataFlow, ERole, IAudioSessionEvents, IAudioSessionEvents_Impl, IMMDeviceEnumerator, IMMNotificationClient,
+        IMMNotificationClient_Impl, MMDeviceEnumerator,
     },
-    System::Com::{CoCreateInstance, CLSCTX_ALL},
+    System::Com::{CLSCTX_ALL, CoCreateInstance},
 };
-use windows_core::{implement, PCWSTR, PWSTR};
+use windows_core::{PCWSTR, PWSTR, implement};
 
 use crate::com::com_initialized;
 use crate::event_args::{
@@ -21,8 +21,8 @@ use crate::event_args::{
     DevicePropertyValueChangedEventArgs, DeviceRemovedEventArgs, DeviceStateChangedEventArgs, DisplayNameChangedArgs,
     GroupingParamChangedArgs, IconPathChangedArgs, SessionDisconnectedArgs, SimpleVolumeChangedArgs, StateChangedArgs,
 };
-use crate::manager::{AudioError, Device, SafeSessionId, Session};
-use crate::session_notification::{session_notification_thread, SessionCreated, SessionNotificationCommand, SessionNotificationMessage};
+use crate::manager::{AudioError, Device, Session};
+use crate::session_notification::{SessionCreated, SessionNotificationCommand, SessionNotificationMessage, session_notification_thread};
 
 #[derive(Error, Debug)]
 pub enum NotificationError {
@@ -78,8 +78,7 @@ impl Notifications {
     where
         CB: Fn(AudioSessionEventArgs) + Send + 'static,
     {
-        let name = unsafe { session.get_name().to_string() }.map_err(NotificationError::PCWSTRConversionError)?;
-        if self._session_event_client.contains_key(&name) {
+        if self._session_event_client.contains_key(session.get_name()) {
             return Err(NotificationError::NotificationAlreadyRegistered);
         }
         com_initialized();
@@ -90,15 +89,16 @@ impl Notifications {
         unsafe { session.get_session().RegisterAudioSessionNotification(&session_notification_client) }
             .map_err(NotificationError::FailedSettingUpNotification)?;
 
-        self._session_event_client
-            .insert(name.clone(), (session.get_session().clone(), session_notification_client));
-        trace!("Session event registered: {}", name);
+        self._session_event_client.insert(
+            session.get_name().clone(),
+            (session.get_session().clone(), session_notification_client),
+        );
+        trace!("Session event registered: {}", session.get_name());
         Ok(())
     }
 
-    pub fn unregister_session_event(&mut self, session_id: &SafeSessionId) -> Result<(), NotificationError> {
-        let name = unsafe { session_id.0.to_string() }.map_err(NotificationError::PCWSTRConversionError)?;
-        if let Some((sc, nc)) = self._session_event_client.remove(&name) {
+    pub fn unregister_session_event(&mut self, name: &str) -> Result<(), NotificationError> {
+        if let Some((sc, nc)) = self._session_event_client.remove(name) {
             unsafe { sc.UnregisterAudioSessionNotification(&nc) }.map_err(NotificationError::NotificationUnregisterError)?;
         }
         trace!("Session event unregistered: {}", name);
@@ -273,7 +273,7 @@ struct ISessionEventClient<CB>
 where
     CB: Fn(AudioSessionEventArgs) + Send + 'static,
 {
-    _session_id: PWSTR,
+    _session_id: String,
     _callback_fn: CB,
 }
 
@@ -281,7 +281,7 @@ impl<CB> ISessionEventClient<CB>
 where
     CB: Fn(AudioSessionEventArgs) + Send + 'static,
 {
-    pub fn new(session_id: PWSTR, callback_fn: CB) -> Self {
+    pub fn new(session_id: String, callback_fn: CB) -> Self {
         Self {
             _session_id: session_id,
             _callback_fn: callback_fn,

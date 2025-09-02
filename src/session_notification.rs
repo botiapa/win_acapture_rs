@@ -5,12 +5,12 @@ use windows::Win32::{
     Media::Audio::{
         IAudioSessionControl, IAudioSessionControl2, IAudioSessionManager2, IAudioSessionNotification, IAudioSessionNotification_Impl,
     },
-    System::Com::{CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED},
+    System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoInitializeEx},
 };
-use windows_core::{implement, Interface};
+use windows_core::{Interface, implement};
 
 use crate::{
-    manager::{Device, SafeSessionId, Session},
+    manager::{Device, Session},
     notifications::NotificationError,
 };
 
@@ -133,10 +133,10 @@ fn thread_inner(
 }
 
 #[derive(Debug)]
-pub struct SessionCreated(SafeSessionId);
+pub struct SessionCreated(String);
 
 impl SessionCreated {
-    pub fn get_id(&self) -> &SafeSessionId {
+    pub fn get_name(&self) -> &String {
         &self.0
     }
 }
@@ -157,7 +157,7 @@ impl IAudioSessionNotification_Impl for IAudioSessionNotificationClient_Impl {
         let s = newsession.clone().expect("Failed cloning session");
         let new_session =
             Session::from_session(s.cast::<IAudioSessionControl2>().expect("Failed casting session")).expect("Failed creating session");
-        (self.callback_fn)(SessionCreated(new_session.get_id()));
+        (self.callback_fn)(SessionCreated(new_session.get_name().clone()));
         Ok(())
     }
 }

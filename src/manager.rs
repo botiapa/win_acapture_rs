@@ -18,6 +18,7 @@ use windows::Win32::{
 };
 use windows_core::{Interface, PCWSTR, PWSTR};
 
+use crate::audio_client::PWSTRWrapper;
 use crate::{com::com_initialized, event_args::DeviceState, sample_format::SampleFormat};
 
 #[derive(Error, Debug)]
@@ -68,13 +69,9 @@ pub enum AudioError {
     FailedGettingNtPath(u32),
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct SafeSessionId(pub(crate) PWSTR);
-unsafe impl Send for SafeSessionId {}
-
 #[derive(Debug, Clone)]
 pub struct Session {
-    name: PWSTR,
+    name: String,
     process_name: Option<String>,
     pid: u32,
     is_system: bool,
@@ -84,26 +81,13 @@ pub struct Session {
 
 impl PartialEq for Session {
     fn eq(&self, other: &Self) -> bool {
-        let n1 = unsafe { self.name.to_string() };
-        let n2 = unsafe { other.name.to_string() };
-        if n1.is_err() || n2.is_err() {
-            return false;
-        }
-        n1.unwrap() == n2.unwrap()
+        self.name == other.name
     }
 }
 
 impl Session {
-    pub fn get_id(&self) -> SafeSessionId {
-        SafeSessionId(self.name)
-    }
-
-    pub fn get_name(&self) -> &PWSTR {
+    pub fn get_name(&self) -> &String {
         &self.name
-    }
-
-    pub fn get_name_string(&self) -> Result<String, AudioError> {
-        Ok(unsafe { self.name.to_string() }.map_err(AudioError::RawStringParseError)?)
     }
 
     pub fn get_process_name(&self) -> &Option<String> {
@@ -125,11 +109,13 @@ impl Session {
     pub(crate) fn from_session(session: IAudioSessionControl2) -> Result<Self, AudioError> {
         let pid = unsafe { session.GetProcessId() }.map_err(AudioError::ProcessIdError)?;
         let name_pwstr = unsafe { session.GetSessionInstanceIdentifier().map_err(AudioError::DisplayNameError)? };
-        let process_name = Self::parse_process_name(name_pwstr);
+        let name_pwstr = PWSTRWrapper(name_pwstr);
+        let name = unsafe { name_pwstr.0.to_string() }.map_err(AudioError::RawStringParseError)?;
+        let process_name = Self::parse_process_name(&name);
         let is_system = unsafe { session.IsSystemSoundsSession() };
         let session1 = session.cast::<IAudioSessionControl>().map_err(AudioError::SessionCastError)?;
         Ok(Self {
-            name: name_pwstr,
+            name,
             process_name,
             pid,
             is_system: is_system == S_OK,
@@ -140,13 +126,14 @@ impl Session {
 
     /// Try to parse process name from the session identifier
     /// This is not a good idea, since the session identifier is not guaranteed to be in the same format
-    fn parse_process_name(name_pwstr: PWSTR) -> Option<String> {
-        Some(unsafe { name_pwstr.to_string() }.ok()?.split_once('|')?.1.split_once('%')?.0.into())
+    fn parse_process_name(name_string: &String) -> Option<String> {
+        Some(name_string.split_once('|')?.1.split_once('%')?.0.into())
     }
 
     pub fn get_display_name(&self) -> Result<String, AudioError> {
         let display_name = unsafe { self.session1.GetDisplayName() }.map_err(AudioError::DisplayNameError)?;
-        Ok(unsafe { display_name.to_string() }.unwrap())
+        let display_name = PWSTRWrapper(display_name);
+        Ok(unsafe { display_name.0.to_string() }.unwrap())
     }
 
     pub fn get_state(&self) -> Result<AudioSessionState, AudioError> {
@@ -156,7 +143,8 @@ impl Session {
 
     pub fn get_icon_path(&self) -> Result<String, AudioError> {
         let icon_path = unsafe { self.session1.GetIconPath() }.map_err(AudioError::IconPathError)?;
-        Ok(unsafe { icon_path.to_string() }.unwrap())
+        let icon_path = PWSTRWrapper(icon_path);
+        Ok(unsafe { icon_path.0.to_string() }.unwrap())
     }
 }
 
@@ -196,7 +184,8 @@ unsafe impl Send for Device {}
 impl Device {
     pub fn get_id(&self) -> Result<String, AudioError> {
         let id = unsafe { self.inner.GetId() }.map_err(AudioError::DeviceError)?;
-        Ok(unsafe { id.to_string() }.map_err(AudioError::RawStringParseError)?)
+        let id = PWSTRWrapper(id);
+        Ok(unsafe { id.0.to_string() }.map_err(AudioError::RawStringParseError)?)
     }
 
     pub fn get_state(&self) -> Result<DeviceState, AudioError> {
@@ -320,9 +309,8 @@ impl SessionManager {
         Ok(processes)
     }
 
-    pub fn session_from_id(searched_id: &SafeSessionId) -> Result<Session, AudioError> {
+    pub fn session_from_id(searched_id: &str) -> Result<Session, AudioError> {
         let dev_collection = Devices::new(eRender).map_err(AudioError::DeviceEnumError)?;
-        let searched_id = unsafe { searched_id.0.to_string() }.map_err(AudioError::RawStringParseError)?;
         // This is a bit inefficient, but it's the only way, I found, to get the session reliably IAudioSessionManager::GetAudioSessionControl wasn't reliable
         // It's still plenty fast, so it's not a big deal (on the order of tenths of microseconds)
         for dev in dev_collection {
