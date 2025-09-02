@@ -174,7 +174,7 @@ impl AudioClient {
             None => unsafe { audio_client.GetMixFormat() }.map_err(AudioClientError::FailedToGetMixFormat)?,
         };
 
-        let audio_client = self.initalize_client(audio_client, format, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, BUFFER_DURATION_MS)?;
+        let audio_client = self.initialize_client(audio_client, format, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, BUFFER_DURATION_MS)?;
 
         AudioStreamConfig::create_capture_stream(data_callback, error_callback, audio_client, self.format.clone())
     }
@@ -197,7 +197,7 @@ impl AudioClient {
         let audio_client =
             unsafe { dev.inner.Activate::<IAudioClient>(Com::CLSCTX_ALL, None) }.map_err(AudioClientError::FailedToStartAudioClient)?;
         let capture_format = unsafe { audio_client.GetMixFormat() }.map_err(AudioClientError::FailedToGetMixFormat)?;
-        let audio_client = self.initalize_client(
+        let audio_client = self.initialize_client(
             audio_client,
             capture_format,
             AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -256,7 +256,7 @@ impl AudioClient {
             .cast::<IAudioClient>()
             .map_err(AudioClientError::FailedToStartAudioClient)?;
         let capture_format = self.format.clone().unwrap_or_default().into();
-        self.initalize_client(
+        self.initialize_client(
             audio_client,
             &capture_format,
             AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
@@ -269,11 +269,11 @@ impl AudioClient {
             unsafe { dev.inner.Activate::<IAudioClient>(Com::CLSCTX_ALL, None) }.map_err(AudioClientError::FailedToStartAudioClient)?;
         let format = unsafe { audio_client.GetMixFormat() }.map_err(AudioClientError::FailedToGetMixFormat)?;
         let format = WaveFormatWrapper::from_ptr(format);
-        self.initalize_client(audio_client, *format, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0)
+        self.initialize_client(audio_client, *format, AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 0)
             .map(|client| (format, client))
     }
 
-    fn initalize_client(
+    fn initialize_client(
         &mut self,
         audio_client: IAudioClient,
         format: *const WAVEFORMATEX,
