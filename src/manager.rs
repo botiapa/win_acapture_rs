@@ -5,13 +5,14 @@ use windows::Win32::{
     Devices::Properties,
     Foundation::{self, GetLastError, S_FALSE, S_OK},
     Media::Audio::{
-        eCapture, eConsole, eRender, AudioSessionStateActive, AudioSessionStateExpired, AudioSessionStateInactive, EDataFlow,
-        IAudioSessionControl, IAudioSessionControl2, IAudioSessionEnumerator, IAudioSessionManager2, IMMDevice, IMMDeviceCollection,
-        IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_E_UNSUPPORTED_FORMAT, AUDCLNT_SHAREMODE_SHARED, DEVICE_STATE_ACTIVE, WAVEFORMATEX,
+        AUDCLNT_E_UNSUPPORTED_FORMAT, AUDCLNT_SHAREMODE_SHARED, AudioSessionStateActive, AudioSessionStateExpired,
+        AudioSessionStateInactive, DEVICE_STATE_ACTIVE, EDataFlow, IAudioSessionControl, IAudioSessionControl2, IAudioSessionEnumerator,
+        IAudioSessionManager2, IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX, eCapture, eConsole,
+        eRender,
     },
     Storage::FileSystem::QueryDosDeviceW,
     System::{
-        Com::{self, CoCreateInstance, CLSCTX_ALL, STGM_READ},
+        Com::{self, CLSCTX_ALL, CoCreateInstance, STGM_READ},
         Variant::VT_LPWSTR,
     },
 };
