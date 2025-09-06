@@ -7,3 +7,4 @@ pub mod manager;
 pub mod notifications;
 pub mod sample_format;
 pub mod session_notification;
+pub mod stream_instant;

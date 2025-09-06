@@ -39,6 +39,7 @@ pub enum AudioClientError {
     FailedToGetMixFormat(windows_core::Error),
     FailedToCreateThread,
     StreamAlreadyStarted,
+    FailedToGetAudioClock(windows_core::Error),
 }
 
 impl Display for AudioClientError {

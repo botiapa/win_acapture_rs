@@ -3,18 +3,19 @@ use std::{
     time::Instant,
 };
 
+use crate::stream_instant::StreamInstant;
+use crate::{
+    audio_client::{AudioClientError, EventHandleWrapper, get_wait_error},
+    sample_format::SampleFormat,
+};
+use windows::Win32::Media::Audio::{AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, IAudioClock};
 use windows::Win32::{
     Foundation::{HANDLE, WAIT_OBJECT_0},
-    Media::Audio::{IAudioCaptureClient, IAudioClient, IAudioRenderClient, AUDCLNT_BUFFERFLAGS_SILENT},
+    Media::Audio::{AUDCLNT_BUFFERFLAGS_SILENT, IAudioCaptureClient, IAudioClient, IAudioRenderClient},
     System::Threading::{
-        CreateEventA, CreateEventW, GetCurrentThread, SetEvent, SetThreadPriority, WaitForMultipleObjectsEx, INFINITE,
-        THREAD_PRIORITY_TIME_CRITICAL,
+        CreateEventA, CreateEventW, GetCurrentThread, INFINITE, SetEvent, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
+        WaitForMultipleObjectsEx,
     },
-};
-
-use crate::{
-    audio_client::{get_wait_error, AudioClientError, EventHandleWrapper},
-    sample_format::SampleFormat,
 };
 
 pub(crate) struct StreamRunContext<T> {
@@ -47,7 +48,7 @@ unsafe impl Send for AudioStreamConfig {}
 
 pub struct CapturePacket<'a> {
     data: &'a [u8],
-    timestamp: Instant,
+    timestamp: StreamInstant,
 }
 
 impl<'a> CapturePacket<'a> {
@@ -55,8 +56,8 @@ impl<'a> CapturePacket<'a> {
         self.data
     }
 
-    pub fn timestamp(&self) -> Instant {
-        self.timestamp
+    pub fn timestamp(&self) -> &StreamInstant {
+        &self.timestamp
     }
 }
 
@@ -169,12 +170,12 @@ impl AudioStreamConfig {
     {
         Self::set_thread_priority();
         let (audio_client, capture_client) = (run_context.audio_client, run_context.stream_client);
+        let audio_clock = unsafe { audio_client.GetService::<IAudioClock>() }.map_err(AudioClientError::FailedToGetAudioClock)?;
 
         let block_align = run_context.format.block_align() as usize;
 
         let mut buffer: *mut u8 = std::ptr::null_mut();
         let mut flags: u32 = 0;
-        let mut pu64deviceposition: u64 = 0;
         let mut pu64qpcposition: u64 = 0;
 
         let h_event = unsafe { CreateEventA(None, false, false, None) }.map_err(|h| AudioClientError::FailedToCreateStopEvent(h))?;
@@ -199,13 +200,13 @@ impl AudioStreamConfig {
                     &mut buffer,
                     &mut frames_available as *mut _,
                     &mut flags as *mut _,
-                    Some(&mut pu64deviceposition as *mut _),
+                    None,
                     Some(&mut pu64qpcposition as *mut _),
                 )
             }
             .map_err(AudioClientError::FailedGettingBuffer)?;
             debug_assert!(!buffer.is_null());
-            let now = Instant::now();
+            let now = convert_instant(pu64qpcposition);
 
             let buf_slice = unsafe { std::slice::from_raw_parts(buffer, frames_available as usize * block_align) };
             data_callback(CapturePacket {
@@ -266,6 +267,12 @@ impl AudioStreamConfig {
             let _ = SetThreadPriority(curr_thr, THREAD_PRIORITY_TIME_CRITICAL);
         }
     }
+}
+
+fn convert_instant(buffer_qpc_position: u64) -> StreamInstant {
+    // The `qpc_position` is in 100 nanosecond units. Convert it to nanoseconds. source: `https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudiocaptureclient-getbuffer`
+    let qpc_nanos = buffer_qpc_position as i128 * 100;
+    StreamInstant::from_nanos_i128(qpc_nanos).expect("performance counter out of range of `StreamInstant` representation")
 }
 
 impl AudioStream {
