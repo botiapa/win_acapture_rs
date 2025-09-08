@@ -1,9 +1,8 @@
 use crate::audio_stream::CapturePacket;
-use crate::manager::{DeviceEnumError, DeviceManager};
+use crate::manager::DeviceEnumError;
 use crate::{activation_params::SafeActivationParams, audio_stream::AudioStreamConfig, sample_format::SampleFormat};
 use crate::{com::com_initialized, manager::Device};
 use log::error;
-use std::ptr::null;
 use std::{fmt::Display, ops::Deref, sync::Arc};
 use thiserror::Error;
 use windows::Win32::System::Com::StringFromIID;
@@ -143,7 +142,8 @@ impl AudioClient {
             BUFFER_DURATION_MS,
         )?;
 
-        AudioStreamConfig::create_capture_stream(data_callback, error_callback, audio_client, self.format.clone())
+        let out_format = SampleFormat::from_wave_format_ex(&capture_format);
+        AudioStreamConfig::create_capture_stream(data_callback, error_callback, audio_client, Some(out_format))
     }
 
     /// Start recording audio from an input device
@@ -337,13 +337,39 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for ActivateHandler_Impl {
 
 #[cfg(test)]
 mod tests {
-    use crate::manager::DeviceManager;
-
     use super::*;
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
 
     #[test]
     fn playback() {
         let client = AudioClient::new();
-        let (audio_stream, format) = client.start_playback_device(None, |data| false, |err| {}).unwrap();
+        let (err_sender, err_recv) = channel();
+        let (audio_stream, _format) = client
+            .start_playback_device(None, |_data| false, move |err| err_sender.send(err).unwrap())
+            .unwrap();
+        audio_stream.start().unwrap();
+
+        if let Some(err) = err_recv.recv_timeout(Duration::from_millis(10)).ok() {
+            panic!("Error during playback: {:?}", err);
+        }
+    }
+
+    #[test]
+    fn process_capture() {
+        let rendering_client = AudioClient::new();
+        let (audio_stream_config, _format) = rendering_client.start_playback_device(None, |_data| false, |_err| {}).unwrap();
+        audio_stream_config.start().unwrap();
+
+        let client = AudioClient::new();
+        let (err_sender, err_recv) = channel();
+        let audio_stream_config_capture = client
+            .start_recording_process(std::process::id(), |_data| {}, move |err| err_sender.send(err).unwrap())
+            .unwrap();
+        audio_stream_config_capture.start().unwrap();
+
+        if let Some(err) = err_recv.recv_timeout(Duration::from_millis(10)).ok() {
+            panic!("Error during process cap: {:?}", err);
+        }
     }
 }

@@ -170,7 +170,6 @@ impl AudioStreamConfig {
     {
         Self::set_thread_priority();
         let (audio_client, capture_client) = (run_context.audio_client, run_context.stream_client);
-        let audio_clock = unsafe { audio_client.GetService::<IAudioClock>() }.map_err(AudioClientError::FailedToGetAudioClock)?;
 
         let block_align = run_context.format.block_align() as usize;
 
