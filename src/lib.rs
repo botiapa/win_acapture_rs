@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 pub mod activation_params;
 pub mod audio_client;
 pub mod audio_stream;

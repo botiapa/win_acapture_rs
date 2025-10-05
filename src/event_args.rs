@@ -1,6 +1,6 @@
 use windows::Win32::{
     Foundation::{self, PROPERTYKEY},
-    Media::Audio::{AudioSessionDisconnectReason, AudioSessionState, EDataFlow, ERole, DEVICE_STATE},
+    Media::Audio::{AudioSessionDisconnectReason, AudioSessionState, DEVICE_STATE, EDataFlow, ERole},
 };
 use windows_core::PCWSTR;
 
@@ -18,12 +18,14 @@ pub enum AudioSessionEventArgs {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct DisplayNameChangedArgs {
     pub(crate) newdisplayname: PCWSTR,
     pub(crate) eventcontext: *const windows_core::GUID,
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct SimpleVolumeChangedArgs {
     pub(crate) newvolume: f32,
     pub(crate) newmute: Foundation::BOOL,
@@ -31,6 +33,7 @@ pub struct SimpleVolumeChangedArgs {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct ChannelVolumeChangedArgs {
     pub(crate) channelcount: u32,
     pub(crate) newchannelvolumearray: *const f32,
@@ -39,6 +42,7 @@ pub struct ChannelVolumeChangedArgs {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct GroupingParamChangedArgs {
     pub(crate) newgroupingparam: *const windows_core::GUID,
     pub(crate) eventcontext: *const windows_core::GUID,
@@ -97,6 +101,7 @@ pub enum SessionDisconnectReason {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct IconPathChangedArgs {
     pub(crate) newiconpath: PCWSTR,
     pub(crate) eventcontext: *const windows_core::GUID,
@@ -120,7 +125,9 @@ pub enum DeviceNotificationEventArgs {
 
 #[derive(Debug)]
 pub struct DefaultDeviceChangedEventArgs {
+    #[allow(dead_code)]
     pub(crate) flow: EDataFlow,
+    #[allow(dead_code)]
     pub(crate) role: ERole,
     pub(crate) defaultdevice: PCWSTR,
 }
@@ -201,6 +208,7 @@ pub const DEVICE_STATE_UNPLUGGED: DEVICE_STATE = DEVICE_STATE(8u32);
 #[derive(Debug)]
 pub struct DevicePropertyValueChangedEventArgs {
     pub(crate) pwstrDeviceId: PCWSTR,
+    #[allow(dead_code)]
     pub(crate) key: PROPERTYKEY,
 }
 

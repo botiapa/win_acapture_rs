@@ -1,14 +1,10 @@
-use std::{
-    thread::{self},
-    time::Instant,
-};
+use std::thread::{self};
 
 use crate::stream_instant::StreamInstant;
 use crate::{
     audio_client::{AudioClientError, EventHandleWrapper, get_wait_error},
     sample_format::SampleFormat,
 };
-use windows::Win32::Media::Audio::{AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, IAudioClock};
 use windows::Win32::{
     Foundation::{HANDLE, WAIT_OBJECT_0},
     Media::Audio::{AUDCLNT_BUFFERFLAGS_SILENT, IAudioCaptureClient, IAudioClient, IAudioRenderClient},
@@ -25,17 +21,6 @@ pub(crate) struct StreamRunContext<T> {
     format: SampleFormat,
 }
 unsafe impl<T> Send for StreamRunContext<T> {}
-
-impl<T> StreamRunContext<T> {
-    pub(crate) fn new(audio_client: IAudioClient, stream_client: T, stop_handle: HANDLE, format: SampleFormat) -> Self {
-        Self {
-            audio_client,
-            stream_client,
-            stop_handle,
-            format,
-        }
-    }
-}
 
 pub struct AudioStreamConfig {
     stream_fn: Box<dyn FnOnce() + Send + 'static>,

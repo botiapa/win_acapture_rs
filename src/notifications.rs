@@ -4,7 +4,7 @@ use std::{collections::HashMap, string::FromUtf16Error};
 
 use log::trace;
 use thiserror::Error;
-use windows::Win32::Media::Audio::{AudioSessionDisconnectReason, AudioSessionState, IAudioSessionControl2};
+use windows::Win32::Media::Audio::IAudioSessionControl2;
 use windows::Win32::{
     Foundation::{self, PROPERTYKEY},
     Media::Audio::{
@@ -13,7 +13,7 @@ use windows::Win32::{
     },
     System::Com::{CLSCTX_ALL, CoCreateInstance},
 };
-use windows_core::{PCWSTR, PWSTR, implement};
+use windows_core::{PCWSTR, implement};
 
 use crate::com::com_initialized;
 use crate::event_args::{
@@ -197,7 +197,7 @@ impl Drop for Notifications {
             trace!("Session event unregistered");
         }
 
-        if let Some((send, recv, t)) = self._session_notification.take() {
+        if let Some((send, _recv, t)) = self._session_notification.take() {
             send.send(SessionNotificationCommand::Stop).unwrap();
             t.join().unwrap();
             trace!("Session notification thread stopped");

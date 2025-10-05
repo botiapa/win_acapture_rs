@@ -16,6 +16,7 @@ use crate::{
 
 pub(crate) enum SessionNotificationMessage {
     Ready,
+    #[allow(dead_code)]
     Error(NotificationError),
     NotificationRegistered,
     NotificationUnregistered,
