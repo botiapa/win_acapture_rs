@@ -45,15 +45,13 @@ impl StreamInstant {
         (self.secs as i128 * 1_000_000_000) + self.nanos as i128
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn from_nanos(nanos: i64) -> Self {
+    pub fn from_nanos(nanos: i64) -> Self {
         let secs = nanos / 1_000_000_000;
         let subsec_nanos = nanos - secs * 1_000_000_000;
         Self::new(secs, subsec_nanos as u32)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn from_nanos_i128(nanos: i128) -> Option<Self> {
+    pub fn from_nanos_i128(nanos: i128) -> Option<Self> {
         let secs = nanos / 1_000_000_000;
         if secs > i64::MAX as i128 || secs < i64::MIN as i128 {
             None
@@ -64,8 +62,7 @@ impl StreamInstant {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn from_secs_f64(secs: f64) -> Self {
+    pub fn from_secs_f64(secs: f64) -> Self {
         let s = secs.floor() as i64;
         let ns = ((secs - s as f64) * 1_000_000_000.0) as u32;
         Self::new(s, ns)
